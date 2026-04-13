@@ -5,25 +5,16 @@ import 'package:signals/signals_flutter.dart';
 /// 播放控制栏：进度条 + 播放/暂停/跳转按钮。
 class ControlsBar extends StatelessWidget {
   final FlutterCacheVideoPlayer app;
-  final ReadonlySignal<PlayState> playState;
-  final ReadonlySignal<Duration> position;
-  final ReadonlySignal<Duration> duration;
 
-  const ControlsBar({
-    super.key,
-    required this.app,
-    required this.playState,
-    required this.position,
-    required this.duration,
-  });
+  const ControlsBar({super.key, required this.app});
 
-  PlayerService get _svc => app.playerService;
+  FlutterCacheVideoPlayerController get _ctrl => app.controller;
 
   @override
   Widget build(BuildContext context) {
-    final ps = playState.watch(context);
-    final pos = position.watch(context);
-    final dur = duration.watch(context);
+    final ps = _ctrl.state.playState.watch(context);
+    final pos = _ctrl.state.position.watch(context);
+    final dur = _ctrl.state.duration.watch(context);
     final isPlaying = ps == PlayState.playing;
     final textStyle = Theme.of(context).textTheme.bodySmall!;
 
@@ -46,7 +37,7 @@ class ControlsBar extends StatelessWidget {
                           ? pos.inMilliseconds.clamp(0, dur.inMilliseconds).toDouble()
                           : 0,
                       max: dur.inMilliseconds > 0 ? dur.inMilliseconds.toDouble() : 1,
-                      onChanged: (v) => _svc.seek(Duration(milliseconds: v.toInt())),
+                      onChanged: (v) => _ctrl.seek(Duration(milliseconds: v.toInt())),
                     ),
                   ),
                   Text(_fmt(dur), style: textStyle),
@@ -59,32 +50,32 @@ class ControlsBar extends StatelessWidget {
               children: [
                 IconButton(
                   icon: const Icon(Icons.skip_previous),
-                  onPressed: () => app.playlistManager.previous(),
+                  onPressed: () => app.playlistController.previous(),
                 ),
                 IconButton(
                   icon: const Icon(Icons.replay_10),
                   onPressed: () {
                     final n = pos - const Duration(seconds: 10);
-                    _svc.seek(n < Duration.zero ? Duration.zero : n);
+                    _ctrl.seek(n < Duration.zero ? Duration.zero : n);
                   },
                 ),
                 const SizedBox(width: 8),
                 IconButton.filled(
                   iconSize: 40,
                   icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
-                  onPressed: () => _svc.playOrPause(),
+                  onPressed: () => _ctrl.playOrPause(),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
                   icon: const Icon(Icons.forward_10),
                   onPressed: () {
                     final n = pos + const Duration(seconds: 10);
-                    _svc.seek(n > dur ? dur : n);
+                    _ctrl.seek(n > dur ? dur : n);
                   },
                 ),
                 IconButton(
                   icon: const Icon(Icons.skip_next),
-                  onPressed: () => app.playlistManager.next(),
+                  onPressed: () => app.playlistController.next(),
                 ),
               ],
             ),

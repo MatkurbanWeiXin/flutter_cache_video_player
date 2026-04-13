@@ -26,29 +26,13 @@ export 'src/proxy/mime_detector.dart';
 export 'src/proxy/stream_splitter.dart';
 
 // Player
-export 'src/player/player_service.dart';
-export 'src/player/player_state.dart';
+export 'src/player/flutter_cache_video_player_controller.dart';
+export 'src/player/flutter_cache_video_player_state.dart';
 export 'src/player/platform_player_factory.dart';
-export 'src/player/playlist_manager.dart';
+export 'src/player/flutter_cache_video_playlist_controller.dart';
 
-// UI - Themes
-export 'src/ui/themes/light_theme.dart';
-export 'src/ui/themes/dark_theme.dart';
-export 'src/ui/themes/theme_controller.dart';
-
-// UI - Layouts
-export 'src/ui/layouts/mobile_layout.dart';
-export 'src/ui/layouts/tablet_layout.dart';
-export 'src/ui/layouts/desktop_layout.dart';
-export 'src/ui/responsive/adaptive_scaffold.dart';
-
-// UI - Widgets
-export 'src/ui/widgets/video_player_widget.dart';
-export 'src/ui/widgets/audio_player_widget.dart';
-export 'src/ui/widgets/progress_bar.dart';
-export 'src/ui/widgets/cache_indicator.dart';
-export 'src/ui/widgets/playlist_panel.dart';
-export 'src/ui/widgets/settings_sheet.dart';
+// UI
+export 'src/ui/flutter_cache_video_player_view.dart';
 
 // Utils
 export 'src/utils/url_hasher.dart';

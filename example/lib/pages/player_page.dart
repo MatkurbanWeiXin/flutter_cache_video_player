@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_video_player/flutter_cache_video_player.dart';
-import 'package:signals/signals_flutter.dart';
 
 import '../widgets/controls_bar.dart';
 import '../widgets/playlist_section.dart';
-import '../widgets/video_surface.dart';
 
 class PlayerPage extends StatelessWidget {
   final FlutterCacheVideoPlayer app;
@@ -57,67 +55,20 @@ class PlayerPage extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Player area – bridges PlayerState (ChangeNotifier) → Signals
-// Only used inside PlayerPage, not reusable elsewhere.
+// Player area — directly reads signals from the controller state.
 // ---------------------------------------------------------------------------
-class _PlayerArea extends StatefulWidget {
+class _PlayerArea extends StatelessWidget {
   final FlutterCacheVideoPlayer app;
   const _PlayerArea({required this.app});
 
   @override
-  State<_PlayerArea> createState() => _PlayerAreaState();
-}
-
-class _PlayerAreaState extends State<_PlayerArea> with SignalsMixin {
-  late final _playState = createSignal(PlayState.idle);
-  late final _position = createSignal(Duration.zero);
-  late final _duration = createSignal(Duration.zero);
-  late final _isBuffering = createSignal(false);
-  late final _errorMsg = createSignal<String?>(null);
-
-  PlayerService get _svc => widget.app.playerService;
-
-  @override
-  void initState() {
-    super.initState();
-    _svc.state.addListener(_sync);
-    _sync();
-  }
-
-  void _sync() {
-    final s = _svc.state;
-    _playState.value = s.playState;
-    _position.value = s.position;
-    _duration.value = s.duration;
-    _isBuffering.value = s.isBuffering;
-    _errorMsg.value = s.errorMessage;
-  }
-
-  @override
-  void dispose() {
-    _svc.state.removeListener(_sync);
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final ctrl = app.controller;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: VideoSurface(
-            playerService: _svc,
-            playState: _playState,
-            isBuffering: _isBuffering,
-            errorMessage: _errorMsg,
-          ),
-        ),
-        ControlsBar(
-          app: widget.app,
-          playState: _playState,
-          position: _position,
-          duration: _duration,
-        ),
+        Expanded(child: FlutterCacheVideoPlayerView(controller: ctrl)),
+        ControlsBar(app: app),
       ],
     );
   }

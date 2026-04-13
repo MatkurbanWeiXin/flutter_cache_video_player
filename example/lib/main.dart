@@ -30,7 +30,7 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
   Future<void> _initApp() async {
     try {
       await _app.init();
-      _app.playlistManager.setPlaylist([
+      _app.playlistController.setPlaylist([
         const PlaylistItem(
           url: 'https://videos.pexels.com/video-files/33538187/14261042_1080_1920_60fps.mp4',
           title: 'Test Video 1',
@@ -44,7 +44,7 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
           title: 'Butterfly',
         ),
       ]);
-      await _app.playlistManager.playIndex(0);
+      await _app.playlistController.playIndex(0);
       _ready.value = true;
     } catch (e) {
       _error.value = e.toString();
@@ -85,8 +85,6 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
     return MaterialApp(
       title: 'Cache Video Player',
       debugShowCheckedModeBanner: false,
-      theme: buildLightTheme(),
-      darkTheme: buildDarkTheme(),
       themeMode: ThemeMode.system,
       home: home,
     );

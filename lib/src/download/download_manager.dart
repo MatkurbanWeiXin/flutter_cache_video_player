@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:typed_data';
+import 'package:signals/signals.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import '../core/platform_detector.dart';
@@ -23,20 +24,15 @@ class DownloadManager {
     if (cmp != 0) return cmp;
     return a.chunkIndex.compareTo(b.chunkIndex);
   });
-  StreamSubscription? _eventSub;
+  void Function()? _eventEffectDisposer;
   String? _currentUrlHash;
   MediaIndex? _currentMedia;
   ChunkBitmap? _currentBitmap;
 
-  final _progressController = StreamController<ChunkProgress>.broadcast();
-  final _completionController = StreamController<ChunkCompleted>.broadcast();
-  final _failureController = StreamController<ChunkFailed>.broadcast();
-  final _mediaCompleteController = StreamController<String>.broadcast();
-
-  Stream<ChunkProgress> get progressStream => _progressController.stream;
-  Stream<ChunkCompleted> get completionStream => _completionController.stream;
-  Stream<ChunkFailed> get failureStream => _failureController.stream;
-  Stream<String> get mediaCompleteStream => _mediaCompleteController.stream;
+  final latestProgress = signal<ChunkProgress?>(null);
+  final latestCompletion = signal<ChunkCompleted?>(null);
+  final latestFailure = signal<ChunkFailed?>(null);
+  final latestMediaComplete = signal<String?>(null);
 
   final Map<int, int> _retryCount = {};
 
@@ -54,14 +50,18 @@ class DownloadManager {
     _pool = DownloadWorkerPool(workerCount: workerCount, config: config);
     await _pool.start();
 
-    _eventSub = _pool.events.listen(_onWorkerEvent);
+    _eventEffectDisposer = effect(() {
+      final event = _pool.latestEvent.value;
+      if (event == null) return;
+      _onWorkerEvent(event);
+    });
     Logger.info('DownloadManager initialized with $workerCount workers');
   }
 
   void _onWorkerEvent(WorkerEvent event) {
     switch (event) {
       case ChunkProgress():
-        _progressController.add(event);
+        latestProgress.set(event, force: true);
         break;
       case ChunkCompleted():
         _onChunkCompleted(event);
@@ -73,14 +73,15 @@ class DownloadManager {
         _dispatchNext();
         break;
       case WorkerCancelled(:final chunkIndex):
-        // 向 failureStream 发送事件，以解除 _downloadAndStream 中等待的 Completer。
+        // 向 failureSignal 发送事件，以解除 _downloadAndStream 中等待的 Completer。
         // Emit failure so that _downloadAndStream completers are unblocked.
-        _failureController.add(
+        latestFailure.set(
           ChunkFailed(
             chunkIndex: chunkIndex,
             errorMessage: 'Download cancelled (media switched)',
             retryable: false,
           ),
+          force: true,
         );
         _dispatchNext();
         break;
@@ -88,7 +89,7 @@ class DownloadManager {
   }
 
   Future<void> _onChunkCompleted(ChunkCompleted event) async {
-    _completionController.add(event);
+    latestCompletion.set(event, force: true);
     _retryCount.remove(event.chunkIndex);
 
     // Update bitmap
@@ -101,7 +102,7 @@ class DownloadManager {
         final incomplete = _currentBitmap!.getIncompleteChunks(_currentMedia!.totalChunks);
         if (incomplete.isEmpty) {
           await cacheRepo.markCompleted(_currentUrlHash!);
-          _mediaCompleteController.add(_currentUrlHash!);
+          latestMediaComplete.set(_currentUrlHash!, force: true);
           Logger.info('All chunks completed for $_currentUrlHash');
 
           // Trigger merge
@@ -114,7 +115,7 @@ class DownloadManager {
   }
 
   void _onChunkFailed(ChunkFailed event) {
-    _failureController.add(event);
+    latestFailure.set(event, force: true);
 
     if (event.retryable) {
       final count = _retryCount[event.chunkIndex] ?? 0;
@@ -318,11 +319,7 @@ class DownloadManager {
   /// Disposes resources, shutting down the pool and all event streams.
   Future<void> dispose() async {
     cancelAll();
-    await _eventSub?.cancel();
+    _eventEffectDisposer?.call();
     await _pool.shutdown();
-    await _progressController.close();
-    await _completionController.close();
-    await _failureController.close();
-    await _mediaCompleteController.close();
   }
 }

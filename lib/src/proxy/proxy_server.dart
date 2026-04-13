@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:signals/signals.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import '../data/models/media_index.dart';
@@ -236,17 +237,17 @@ class ProxyCacheServer {
     // Only wait for completion/failure — no longer subscribing to progressStream for raw bytes.
     final dataCompleter = Completer<void>();
 
-    final completeSub = downloadManager.completionStream
-        .where((e) => e.chunkIndex == chunkIndex)
-        .listen((event) {
-          if (!dataCompleter.isCompleted) dataCompleter.complete();
-        });
+    final completeDisposer = effect(() {
+      final e = downloadManager.latestCompletion.value;
+      if (e != null && e.chunkIndex == chunkIndex && !dataCompleter.isCompleted) {
+        dataCompleter.complete();
+      }
+    });
 
-    final failSub = downloadManager.failureStream.where((e) => e.chunkIndex == chunkIndex).listen((
-      event,
-    ) {
-      if (!dataCompleter.isCompleted) {
-        dataCompleter.completeError(Exception('Download failed: ${event.errorMessage}'));
+    final failDisposer = effect(() {
+      final e = downloadManager.latestFailure.value;
+      if (e != null && e.chunkIndex == chunkIndex && !dataCompleter.isCompleted) {
+        dataCompleter.completeError(Exception('Download failed: ${e.errorMessage}'));
       }
     });
 
@@ -290,8 +291,8 @@ class ProxyCacheServer {
         throw StateError('Chunk file not found after download: $chunkPath');
       }
     } finally {
-      await completeSub.cancel();
-      await failSub.cancel();
+      completeDisposer();
+      failDisposer();
     }
   }
 

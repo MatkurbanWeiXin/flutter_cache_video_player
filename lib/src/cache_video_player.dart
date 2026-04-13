@@ -6,11 +6,10 @@ import 'data/cache_index_db.dart';
 import 'data/repositories/cache_repository.dart';
 import 'data/repositories/history_repository.dart';
 import 'download/download_manager.dart';
-import 'player/player_service.dart';
+import 'player/flutter_cache_video_player_controller.dart';
 import 'player/platform_player_factory.dart';
-import 'player/playlist_manager.dart';
+import 'player/flutter_cache_video_playlist_controller.dart';
 import 'proxy/proxy_server.dart';
-import 'ui/themes/theme_controller.dart';
 import 'utils/file_utils.dart';
 
 /// 插件主入口，负责初始化并协调所有层（数据库、下载、代理、播放、UI）。
@@ -23,9 +22,8 @@ class FlutterCacheVideoPlayer {
   late final DownloadManager downloadManager;
   ProxyCacheServer? proxyServer;
   late final PlatformPlayerFactory playerFactory;
-  late final PlayerService playerService;
-  late final PlaylistManager playlistManager;
-  final ThemeController themeController = ThemeController();
+  late final FlutterCacheVideoPlayerController controller;
+  late final FlutterCacheVideoPlaylistController playlistController;
 
   bool _initialized = false;
 
@@ -62,16 +60,19 @@ class FlutterCacheVideoPlayer {
 
     // Player
     playerFactory = PlatformPlayerFactory(proxyServer: proxyServer);
-    playerService = PlayerService(
+    controller = FlutterCacheVideoPlayerController(
       config: config,
       playerFactory: playerFactory,
       cacheRepo: cacheRepo,
       historyRepo: historyRepo,
       downloadManager: downloadManager,
     );
-    await playerService.init();
+    await controller.init();
 
-    playlistManager = PlaylistManager(playerService: playerService, config: config);
+    playlistController = FlutterCacheVideoPlaylistController(
+      controller: controller,
+      config: config,
+    );
 
     _initialized = true;
     Logger.info('CacheVideoPlayerApp initialized');
@@ -80,8 +81,8 @@ class FlutterCacheVideoPlayer {
   /// 释放所有资源并关闭服务。
   /// Disposes all resources and shuts down services.
   Future<void> dispose() async {
-    await playerService.dispose();
-    playlistManager.dispose();
+    await controller.dispose();
+    playlistController.dispose();
     await proxyServer?.stop();
     await downloadManager.dispose();
     await _cacheDB.close();

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:signals/signals.dart';
 import '../core/logger.dart';
 
 /// 原生播放器控制器，通过 MethodChannel 和 EventChannel 与各平台原生播放器通信。
@@ -11,40 +12,16 @@ class NativePlayerController {
   int? _textureId;
   StreamSubscription? _eventSubscription;
 
-  final _positionController = StreamController<Duration>.broadcast();
-  final _durationController = StreamController<Duration>.broadcast();
-  final _playingController = StreamController<bool>.broadcast();
-  final _bufferingController = StreamController<bool>.broadcast();
-  final _errorController = StreamController<String>.broadcast();
-  final _completedController = StreamController<void>.broadcast();
+  final positionSignal = signal(Duration.zero);
+  final durationSignal = signal(Duration.zero);
+  final playingSignal = signal(false);
+  final bufferingSignal = signal(false);
+  final errorSignal = signal<String?>(null);
+  final completedSignal = signal(0);
 
   /// 原生纹理 ID，用于 Flutter Texture widget 渲染。
   /// Native texture ID for Flutter Texture widget rendering.
   int? get textureId => _textureId;
-
-  /// 播放位置事件流。
-  /// Stream of playback position updates.
-  Stream<Duration> get positionStream => _positionController.stream;
-
-  /// 媒体总时长事件流。
-  /// Stream of media duration updates.
-  Stream<Duration> get durationStream => _durationController.stream;
-
-  /// 播放/暂停状态事件流。
-  /// Stream of playing state updates.
-  Stream<bool> get playingStream => _playingController.stream;
-
-  /// 缓冲状态事件流。
-  /// Stream of buffering state updates.
-  Stream<bool> get bufferingStream => _bufferingController.stream;
-
-  /// 错误事件流。
-  /// Stream of error events.
-  Stream<String> get errorStream => _errorController.stream;
-
-  /// 播放完成事件流。
-  /// Stream of playback completion events.
-  Stream<void> get completedStream => _completedController.stream;
 
   /// 创建原生播放器实例并注册纹理，返回 Flutter Texture ID。
   /// Creates a native player instance, registers a texture, and returns the Flutter Texture ID.
@@ -63,7 +40,7 @@ class NativePlayerController {
           _handleEvent,
           onError: (error) {
             Logger.error('EventChannel error: $error');
-            _errorController.add(error.toString());
+            errorSignal.set(error.toString(), force: true);
           },
         );
   }
@@ -73,22 +50,22 @@ class NativePlayerController {
     switch (type) {
       case 'position':
         final ms = event['value'] as int;
-        _positionController.add(Duration(milliseconds: ms));
+        positionSignal.value = Duration(milliseconds: ms);
       case 'duration':
         final ms = event['value'] as int;
-        _durationController.add(Duration(milliseconds: ms));
+        durationSignal.value = Duration(milliseconds: ms);
       case 'playing':
         final playing = event['value'] as bool;
-        _playingController.add(playing);
+        playingSignal.value = playing;
       case 'buffering':
         final buffering = event['value'] as bool;
-        _bufferingController.add(buffering);
+        bufferingSignal.value = buffering;
       case 'error':
         final message = event['value'] as String;
         Logger.error('Native player error: $message');
-        _errorController.add(message);
+        errorSignal.set(message, force: true);
       case 'completed':
-        _completedController.add(null);
+        completedSignal.set(completedSignal.value + 1, force: true);
       default:
         Logger.warning('Unknown native event: $type');
     }
@@ -140,12 +117,6 @@ class NativePlayerController {
     } catch (e) {
       Logger.error('Error disposing native player: $e');
     }
-    await _positionController.close();
-    await _durationController.close();
-    await _playingController.close();
-    await _bufferingController.close();
-    await _errorController.close();
-    await _completedController.close();
     _textureId = null;
   }
 }

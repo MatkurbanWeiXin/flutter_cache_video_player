@@ -1,7 +1,7 @@
-import 'dart:async';
+import 'package:signals/signals.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
-import 'player_service.dart';
+import 'flutter_cache_video_player_controller.dart';
 
 /// 播放列表项数据类。
 /// Playlist item data class.
@@ -13,35 +13,34 @@ class PlaylistItem {
   const PlaylistItem({required this.url, required this.title, this.coverUrl});
 }
 
-/// 播放列表管理器，支持顺序/随机/循环模式。
-/// Playlist manager supporting sequential, shuffle, and repeat modes.
-class PlaylistManager {
-  final PlayerService playerService;
+/// 播放列表控制器，支持顺序/随机/循环模式。
+/// Playlist controller supporting sequential, shuffle, and repeat modes.
+class FlutterCacheVideoPlaylistController {
+  final FlutterCacheVideoPlayerController controller;
   final CacheConfig config;
 
   final List<PlaylistItem> _items = [];
-  int _currentIndex = -1;
+  final currentIndex = signal(-1);
   bool _shuffle = false;
   bool _repeat = false;
 
-  final _indexController = StreamController<int>.broadcast();
-
-  PlaylistManager({required this.playerService, required this.config});
+  FlutterCacheVideoPlaylistController({required this.controller, required this.config});
 
   List<PlaylistItem> get items => List.unmodifiable(_items);
-  int get currentIndex => _currentIndex;
-  PlaylistItem? get currentItem =>
-      _currentIndex >= 0 && _currentIndex < _items.length ? _items[_currentIndex] : null;
+  PlaylistItem? get currentItem {
+    final idx = currentIndex.value;
+    return idx >= 0 && idx < _items.length ? _items[idx] : null;
+  }
+
   bool get shuffle => _shuffle;
   bool get repeat => _repeat;
-  Stream<int> get indexStream => _indexController.stream;
 
   /// 设置播放列表并指定起始索引。
   /// Sets the playlist and specifies the starting index.
   void setPlaylist(List<PlaylistItem> items, {int startIndex = 0}) {
     _items.clear();
     _items.addAll(items);
-    _currentIndex = startIndex;
+    currentIndex.value = startIndex;
     Logger.info('Playlist set: ${items.length} items, starting at $startIndex');
   }
 
@@ -49,9 +48,8 @@ class PlaylistManager {
   /// Plays the item at the specified index.
   Future<void> playIndex(int index) async {
     if (index < 0 || index >= _items.length) return;
-    _currentIndex = index;
-    _indexController.add(index);
-    await playerService.open(_items[index].url, resumeHistory: false);
+    currentIndex.value = index;
+    await controller.open(_items[index].url, resumeHistory: false);
   }
 
   /// 播放下一曲，支持随机和循环模式。
@@ -62,7 +60,7 @@ class PlaylistManager {
     if (_shuffle) {
       nextIndex = (DateTime.now().microsecond % _items.length);
     } else {
-      nextIndex = _currentIndex + 1;
+      nextIndex = currentIndex.value + 1;
       if (nextIndex >= _items.length) {
         if (_repeat) {
           nextIndex = 0;
@@ -78,7 +76,7 @@ class PlaylistManager {
   /// Plays the previous item with repeat support.
   Future<void> previous() async {
     if (_items.isEmpty) return;
-    int prevIndex = _currentIndex - 1;
+    int prevIndex = currentIndex.value - 1;
     if (prevIndex < 0) {
       if (_repeat) {
         prevIndex = _items.length - 1;
@@ -106,8 +104,8 @@ class PlaylistManager {
   void removeAt(int index) {
     if (index < 0 || index >= _items.length) return;
     _items.removeAt(index);
-    if (_currentIndex >= _items.length) {
-      _currentIndex = _items.length - 1;
+    if (currentIndex.value >= _items.length) {
+      currentIndex.value = _items.length - 1;
     }
   }
 

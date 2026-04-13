@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:isolate';
+import 'package:signals/signals.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import 'download_task.dart';
@@ -22,12 +23,10 @@ class DownloadWorkerPool {
   final int workerCount;
   final CacheConfig config;
   final List<_WorkerHandle> _workers = [];
-  final _eventController = StreamController<WorkerEvent>.broadcast();
+  final latestEvent = signal<WorkerEvent?>(null);
   bool _isReady = false;
 
   DownloadWorkerPool({required this.workerCount, required this.config});
-
-  Stream<WorkerEvent> get events => _eventController.stream;
   bool get isReady => _isReady;
 
   /// 启动所有 Worker Isolate。
@@ -97,7 +96,7 @@ class DownloadWorkerPool {
         }
       }
     }
-    _eventController.add(event);
+    latestEvent.set(event, force: true);
   }
 
   Future<void> _respawnWorker(int index) async {
@@ -170,7 +169,6 @@ class DownloadWorkerPool {
     }
     _workers.clear();
     _isReady = false;
-    await _eventController.close();
     Logger.info('Worker pool shut down');
   }
 }

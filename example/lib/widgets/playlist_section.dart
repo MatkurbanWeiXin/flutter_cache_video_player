@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_video_player/flutter_cache_video_player.dart';
 import 'package:signals/signals_flutter.dart';
@@ -14,33 +12,23 @@ class PlaylistSection extends StatefulWidget {
 }
 
 class _PlaylistSectionState extends State<PlaylistSection> with SignalsMixin {
-  late final _currentIndex = createSignal(-1);
   late final _shuffle = createSignal(false);
   late final _repeat = createSignal(false);
-  StreamSubscription<int>? _sub;
 
-  PlaylistManager get _mgr => widget.app.playlistManager;
+  FlutterCacheVideoPlaylistController get _mgr => widget.app.playlistController;
 
   @override
   void initState() {
     super.initState();
-    _currentIndex.value = _mgr.currentIndex;
     _shuffle.value = _mgr.shuffle;
     _repeat.value = _mgr.repeat;
-    _sub = _mgr.indexStream.listen((i) => _currentIndex.value = i);
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final items = _mgr.items;
-    final activeIdx = _currentIndex.watch(context);
+    final activeIdx = _mgr.currentIndex.watch(context);
     final shuffleOn = _shuffle.watch(context);
     final repeatOn = _repeat.watch(context);
 
