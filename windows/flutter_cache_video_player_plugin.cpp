@@ -68,14 +68,9 @@ static int64_t GetIntArg(
 // NativeVideoPlayer
 // ══════════════════════════════════════════════════════════════════
 
-// 自定义窗口消息，用于通知平台线程有待处理的事件。
-// Custom window message to notify the platform thread of pending events.
-static constexpr UINT WM_DRAIN_EVENTS = WM_APP + 0x100;
-
 NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar,
                                       HWND hwnd)
     : texture_registrar_(registrar), hwnd_(hwnd) {
-  platform_thread_id_ = GetCurrentThreadId();
   MFStartup(MF_VERSION);
   InitD3D();
   InitMediaEngine();
@@ -173,40 +168,9 @@ bool NativeVideoPlayer::EnsureRenderTarget(UINT w, UINT h) {
 // ── 媒体引擎事件处理 / Media engine event handling ──
 
 void NativeVideoPlayer::OnMediaEvent(DWORD event, DWORD_PTR, DWORD) {
-  switch (event) {
-    case MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA: {
-      double dur = media_engine_->GetDuration();
-      if (!isinf(dur) && !isnan(dur)) {
-        SendEvent("duration",
-                  flutter::EncodableValue(static_cast<int>(dur * 1000)));
-      }
-      SendEvent("buffering", flutter::EncodableValue(false));
-      break;
-    }
-    case MF_MEDIA_ENGINE_EVENT_PLAYING:
-      SendEvent("playing", flutter::EncodableValue(true));
-      StartFrameTimer();
-      break;
-    case MF_MEDIA_ENGINE_EVENT_PAUSE:
-      SendEvent("playing", flutter::EncodableValue(false));
-      break;
-    case MF_MEDIA_ENGINE_EVENT_ENDED:
-      StopFrameTimer();
-      SendEvent("completed", flutter::EncodableValue(nullptr));
-      break;
-    case MF_MEDIA_ENGINE_EVENT_ERROR:
-      SendEvent("error",
-                flutter::EncodableValue(std::string("Media engine error")));
-      break;
-    case MF_MEDIA_ENGINE_EVENT_BUFFERINGSTARTED:
-      SendEvent("buffering", flutter::EncodableValue(true));
-      break;
-    case MF_MEDIA_ENGINE_EVENT_BUFFERINGENDED:
-      SendEvent("buffering", flutter::EncodableValue(false));
-      break;
-    default:
-      break;
-  }
+  // 所有事件通过 OnPollTimer 在平台线程上轮询获取，此回调仅保留以满足接口需求。
+  // All events are polled via OnPollTimer on the platform thread.
+  // This callback is kept only to satisfy the IMFMediaEngineNotify interface.
 }
 
 // ── 帧更新：从媒体引擎提取帧到 CPU 缓冲 / Frame update: extract frame to CPU buffer ──
@@ -256,65 +220,88 @@ void NativeVideoPlayer::UpdateFrame() {
   texture_registrar_->MarkTextureFrameAvailable(texture_id_);
 }
 
-// ── 帧定时器 / Frame timer ──
+// ── 平台线程轮询定时器 / Platform-thread poll timer ──
 
-void NativeVideoPlayer::StartFrameTimer() {
-  StopFrameTimer();
-  CreateTimerQueueTimer(&timer_handle_, nullptr, OnTimer, this, 0, 16,
-                         WT_EXECUTEDEFAULT);
-}
-
-void NativeVideoPlayer::StopFrameTimer() {
-  if (timer_handle_) {
-    DeleteTimerQueueTimer(nullptr, timer_handle_, INVALID_HANDLE_VALUE);
-    timer_handle_ = nullptr;
+void NativeVideoPlayer::StartPollTimer() {
+  if (!poll_timer_active_ && hwnd_) {
+    SetTimer(hwnd_, kPollTimerId, 16, nullptr);
+    poll_timer_active_ = true;
   }
 }
 
-void CALLBACK NativeVideoPlayer::OnTimer(PVOID ctx, BOOLEAN) {
-  static_cast<NativeVideoPlayer*>(ctx)->UpdateFrame();
+void NativeVideoPlayer::StopPollTimer() {
+  if (poll_timer_active_ && hwnd_) {
+    KillTimer(hwnd_, kPollTimerId);
+    poll_timer_active_ = false;
+  }
+}
+
+void NativeVideoPlayer::OnPollTimer() {
+  if (!media_engine_) return;
+
+  // 1. 检查错误 / Check for error
+  ComPtr<IMFMediaError> err;
+  media_engine_->GetError(&err);
+  if (err) {
+    USHORT code = err->GetErrorCode();
+    std::string msg =
+        "MediaEngine error code: " + std::to_string(static_cast<int>(code));
+    SendEvent("error", flutter::EncodableValue(msg));
+    StopPollTimer();
+    return;
+  }
+
+  USHORT readyState = media_engine_->GetReadyState();
+
+  // 2. 时长（元数据可用后发送一次）/ Duration (once, when metadata available)
+  if (!duration_sent_ && readyState >= MF_MEDIA_ENGINE_READY_HAVE_METADATA) {
+    double dur = media_engine_->GetDuration();
+    if (!isinf(dur) && !isnan(dur) && dur > 0) {
+      SendEvent("duration",
+                flutter::EncodableValue(static_cast<int>(dur * 1000)));
+      duration_sent_ = true;
+    }
+  }
+
+  // 3. 播放状态 / Playing state
+  bool paused = (media_engine_->IsPaused() != FALSE);
+  if (paused != last_paused_) {
+    SendEvent("playing", flutter::EncodableValue(!paused));
+    last_paused_ = paused;
+  }
+
+  // 4. 缓冲状态 / Buffering state
+  bool buffering =
+      !duration_sent_ ||
+      readyState < MF_MEDIA_ENGINE_READY_HAVE_FUTURE_DATA;
+  if (buffering != last_buffering_) {
+    SendEvent("buffering", flutter::EncodableValue(buffering));
+    last_buffering_ = buffering;
+  }
+
+  // 5. 播放结束 / Ended
+  bool ended = (media_engine_->IsEnded() != FALSE);
+  if (ended && !last_ended_) {
+    SendEvent("completed", flutter::EncodableValue(nullptr));
+    last_ended_ = true;
+    StopPollTimer();
+    return;
+  }
+
+  // 6. 帧提取 + 位置 / Frame extraction + position
+  UpdateFrame();
 }
 
 // ── 事件发送 / Event sending ──
 
 void NativeVideoPlayer::SendEvent(const std::string& name,
                                    const flutter::EncodableValue& val) {
+  std::lock_guard<std::mutex> lock(sink_mutex_);
+  if (!event_sink_) return;
   flutter::EncodableMap m;
   m[flutter::EncodableValue("event")] = flutter::EncodableValue(name);
   m[flutter::EncodableValue("value")] = val;
-
-  if (GetCurrentThreadId() == platform_thread_id_) {
-    // 已在平台线程上，直接发送。 / Already on the platform thread — send directly.
-    std::lock_guard<std::mutex> lock(sink_mutex_);
-    if (event_sink_) {
-      event_sink_->Success(flutter::EncodableValue(m));
-    }
-  } else {
-    // 从后台线程入队，通知平台线程分发。
-    // Enqueue from background thread; notify platform thread to drain.
-    {
-      std::lock_guard<std::mutex> lock(event_queue_mutex_);
-      pending_events_.push(flutter::EncodableValue(m));
-    }
-    if (hwnd_) {
-      PostMessage(hwnd_, WM_DRAIN_EVENTS, 0, 0);
-    }
-  }
-}
-
-void NativeVideoPlayer::DrainEvents() {
-  std::queue<flutter::EncodableValue> snapshot;
-  {
-    std::lock_guard<std::mutex> lock(event_queue_mutex_);
-    std::swap(snapshot, pending_events_);
-  }
-  std::lock_guard<std::mutex> lock(sink_mutex_);
-  while (!snapshot.empty()) {
-    if (event_sink_) {
-      event_sink_->Success(snapshot.front());
-    }
-    snapshot.pop();
-  }
+  event_sink_->Success(flutter::EncodableValue(m));
 }
 
 void NativeVideoPlayer::SetEventSink(
@@ -340,11 +327,15 @@ int64_t NativeVideoPlayer::Create() {
 void NativeVideoPlayer::Open(const std::string& url) {
   if (!media_engine_) return;
 
-  // 切换源时清理旧状态 / Clean up previous media state on source switch
-  StopFrameTimer();
+  // 切换源时重置状态 / Reset state on source switch
+  StopPollTimer();
   frame_count_ = 0;
   video_w_ = 0;
   video_h_ = 0;
+  duration_sent_ = false;
+  last_buffering_ = true;
+  last_paused_ = true;
+  last_ended_ = false;
 
   BSTR bstr = SysAllocString(Utf8ToWide(url).c_str());
   media_engine_->SetSource(bstr);
@@ -353,8 +344,10 @@ void NativeVideoPlayer::Open(const std::string& url) {
   // Load 后立即调用 Play()，媒体引擎会在准备就绪后自动开始播放。
   // Call Play() right after Load(). The media engine will auto-play once ready.
   media_engine_->Play();
-  SendEvent("playing", flutter::EncodableValue(true));
+
+  // 通知 Dart 端正在缓冲 / Notify Dart that buffering has started
   SendEvent("buffering", flutter::EncodableValue(true));
+  StartPollTimer();
 }
 
 void NativeVideoPlayer::Play() {
@@ -386,7 +379,7 @@ void NativeVideoPlayer::Dispose() {
 }
 
 void NativeVideoPlayer::Cleanup() {
-  StopFrameTimer();
+  StopPollTimer();
   if (media_engine_) {
     media_engine_->Shutdown();
     media_engine_.Reset();
@@ -447,8 +440,8 @@ FlutterCacheVideoPlayerPlugin::FlutterCacheVideoPlayerPlugin(
   HWND hwnd = registrar->GetView()->GetNativeWindow();
   player_ = std::make_unique<NativeVideoPlayer>(tex, hwnd);
 
-  // 注册窗口消息回调，处理来自后台线程的事件分发请求。
-  // Register window proc delegate to drain events posted from background threads.
+  // 注册窗口消息回调，处理平台线程 WM_TIMER 定时器消息。
+  // Register window proc delegate to handle WM_TIMER messages on the platform thread.
   window_proc_id_ = registrar->RegisterTopLevelWindowProcDelegate(
       [this](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         return HandleWindowMessage(hwnd, message, wparam, lparam);
@@ -482,8 +475,8 @@ FlutterCacheVideoPlayerPlugin::~FlutterCacheVideoPlayerPlugin() {
 
 std::optional<LRESULT> FlutterCacheVideoPlayerPlugin::HandleWindowMessage(
     HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-  if (message == WM_DRAIN_EVENTS && player_) {
-    player_->DrainEvents();
+  if (message == WM_TIMER && wparam == kPollTimerId && player_) {
+    player_->OnPollTimer();
     return 0;
   }
   return std::nullopt;
