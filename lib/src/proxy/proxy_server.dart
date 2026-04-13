@@ -45,6 +45,12 @@ class ProxyCacheServer {
   }
 
   Future<Response> _handleRequest(Request request) async {
+    // 健康检查端点，用于验证代理服务器可用。
+    // Health-check endpoint to verify the proxy server is alive.
+    if (request.requestedUri.path == '/ping') {
+      return Response.ok('pong');
+    }
+
     final url = request.requestedUri.queryParameters['url'];
     if (url == null || url.isEmpty) {
       return Response(400, body: 'Missing url parameter');
@@ -276,24 +282,70 @@ class ProxyCacheServer {
   }
 
   Future<MediaIndex?> _initMedia(String url, String urlHash) async {
+    HttpClient? httpClient;
     try {
-      final httpClient = HttpClient();
-      final request = await httpClient.headUrl(Uri.parse(url));
-      final response = await request.close();
+      httpClient = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 10)
+        ..idleTimeout = const Duration(seconds: 10);
 
-      final contentLength = response.contentLength;
+      // 优先使用 GET + Range: bytes=0-0 获取 Content-Range 来确定总大小。
+      // 某些 CDN/服务器不正确支持 HEAD 请求，GET Range 更可靠。
+      // Prefer GET + Range: bytes=0-0 to retrieve Content-Range for total size.
+      // Some CDNs/servers don't support HEAD correctly; GET Range is more reliable.
+      int contentLength = -1;
+      String? mimeStr;
+
+      try {
+        final getRequest = await httpClient.getUrl(Uri.parse(url));
+        getRequest.headers.set('Range', 'bytes=0-0');
+        final getResponse = await getRequest.close();
+
+        // 解析 Content-Range: bytes 0-0/TOTAL
+        // Parse Content-Range: bytes 0-0/TOTAL
+        final contentRange = getResponse.headers.value('content-range');
+        if (contentRange != null) {
+          final match = RegExp(r'/(\d+)$').firstMatch(contentRange);
+          if (match != null) {
+            contentLength = int.parse(match.group(1)!);
+          }
+        }
+
+        final ct = getResponse.headers.contentType;
+        if (ct != null && ct.mimeType != 'application/octet-stream') {
+          mimeStr = ct.mimeType;
+        }
+
+        // 消耗并丢弃响应体以释放连接。
+        // Drain the response body to release the connection.
+        await getResponse.drain<void>();
+      } catch (e) {
+        Logger.warning('GET Range failed for $url, falling back to HEAD: $e');
+      }
+
+      // 降级：使用 HEAD 请求。
+      // Fallback: use HEAD request.
+      if (contentLength <= 0) {
+        try {
+          final headRequest = await httpClient.headUrl(Uri.parse(url));
+          final headResponse = await headRequest.close();
+          contentLength = headResponse.contentLength;
+          final ct = headResponse.headers.contentType;
+          if (ct != null && ct.mimeType != 'application/octet-stream') {
+            mimeStr = ct.mimeType;
+          }
+          await headResponse.drain<void>();
+        } catch (e) {
+          Logger.error('HEAD request also failed for $url: $e');
+          return null;
+        }
+      }
+
       if (contentLength <= 0) {
         Logger.error('Cannot determine content length for $url');
         return null;
       }
 
-      final contentType = response.headers.contentType;
-      String mimeType;
-      if (contentType != null && contentType.mimeType != 'application/octet-stream') {
-        mimeType = contentType.mimeType;
-      } else {
-        mimeType = MimeDetector.detect(url);
-      }
+      final mimeType = mimeStr ?? MimeDetector.detect(url);
 
       final localDir = await FileUtils.getMediaDir(urlHash);
       final totalChunks = (contentLength + config.chunkSize - 1) ~/ config.chunkSize;
@@ -316,11 +368,15 @@ class ProxyCacheServer {
       await cacheRepo.createMediaIndex(mediaIndex);
       await downloadManager.startDownload(url, mediaIndex);
 
-      httpClient.close();
       return mediaIndex;
+    } on SocketException catch (e) {
+      Logger.error('SocketException initializing media $url: $e');
+      return null;
     } catch (e, st) {
       Logger.error('Failed to init media: $url', e, st);
       return null;
+    } finally {
+      httpClient?.close();
     }
   }
 

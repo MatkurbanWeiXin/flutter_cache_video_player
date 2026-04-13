@@ -84,9 +84,16 @@ NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar,
   hwnd_ = GetAncestor(hwnd, GA_ROOT);
   if (!hwnd_) hwnd_ = hwnd;
   platform_thread_id_ = GetCurrentThreadId();
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   MFStartup(MF_VERSION);
-  InitD3D();
-  InitMediaEngine();
+  if (!InitD3D()) {
+    SendEvent("error", flutter::EncodableValue("Failed to initialize D3D11"));
+    return;
+  }
+  if (!InitMediaEngine()) {
+    SendEvent("error", flutter::EncodableValue("Failed to initialize Media Engine"));
+    return;
+  }
 }
 
 NativeVideoPlayer::~NativeVideoPlayer() { Dispose(); }
@@ -102,7 +109,15 @@ bool NativeVideoPlayer::InitD3D() {
       nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, 1,
       D3D11_SDK_VERSION, d3d_device_.ReleaseAndGetAddressOf(),
       &actual, d3d_context_.ReleaseAndGetAddressOf());
-  if (FAILED(hr)) return false;
+  if (FAILED(hr)) {
+    // Fallback: retry without VIDEO_SUPPORT flag (some GPUs/drivers lack it)
+    flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    hr = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, 1,
+        D3D11_SDK_VERSION, d3d_device_.ReleaseAndGetAddressOf(),
+        &actual, d3d_context_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return false;
+  }
 
   // Enable multi-threaded access
   ComPtr<ID3D10Multithread> mt;
@@ -190,6 +205,10 @@ void NativeVideoPlayer::OnMediaEvent(DWORD event, DWORD_PTR, DWORD) {
 
 void NativeVideoPlayer::PollAndRender() {
   if (!media_engine_) return;
+
+  // 确保定时器池线程已初始化 COM（多次调用幂等安全）。
+  // Ensure the timer-pool thread has COM initialized (idempotent, safe to call repeatedly).
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
   // 1. 检查错误 / Check for error
   ComPtr<IMFMediaError> err;
