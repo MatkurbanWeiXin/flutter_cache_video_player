@@ -29,6 +29,10 @@ class DownloadManager {
   MediaIndex? _currentMedia;
   ChunkBitmap? _currentBitmap;
 
+  /// 当前正在下载的媒体 URL 哈希，切换视频后会更新。
+  /// The URL hash of the currently downloading media; updated on video switch.
+  String? get currentUrlHash => _currentUrlHash;
+
   final latestProgress = signal<ChunkProgress?>(null);
   final latestCompletion = signal<ChunkCompleted?>(null);
   final latestFailure = signal<ChunkFailed?>(null);
@@ -152,6 +156,13 @@ class DownloadManager {
     // 切换媒体时立即取消旧任务，释放 Worker 供新媒体使用。
     // Cancel existing downloads immediately to free workers for the new media.
     _pool.cancelAll();
+
+    // 重置信号，避免残留值被新的 effect 监听器误读。
+    // Reset signals so stale values from the previous session are not
+    // misread by newly created effect listeners in the proxy server.
+    latestCompletion.value = null;
+    latestFailure.value = null;
+    latestProgress.value = null;
 
     _currentUrlHash = media.urlHash;
     _currentMedia = media;

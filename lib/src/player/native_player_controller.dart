@@ -74,6 +74,17 @@ class NativePlayerController {
   /// 打开媒体 URL 进行播放。
   /// Opens the media URL for playback.
   Future<void> open(String url) async {
+    // 重置所有信号到初始值，确保原生端发送的新事件（如 playing: true）
+    // 产生真正的值变化，从而触发 effect。否则当上一个视频仍在播放时
+    // 切换视频，playingSignal 始终为 true，signal 库判定无变化不通知。
+    // Reset all signals so that events from the new native session produce
+    // real value changes. Without this, switching while playing leaves
+    // playingSignal == true, and the native "playing: true" becomes a no-op.
+    positionSignal.value = Duration.zero;
+    durationSignal.value = Duration.zero;
+    playingSignal.value = false;
+    bufferingSignal.value = false;
+    errorSignal.value = null;
     await _methodChannel.invokeMethod('open', {'url': url});
   }
 

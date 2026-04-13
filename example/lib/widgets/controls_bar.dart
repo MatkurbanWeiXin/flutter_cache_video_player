@@ -34,10 +34,15 @@ class ControlsBar extends StatelessWidget {
                   Expanded(
                     child: Slider(
                       value: dur.inMilliseconds > 0
-                          ? pos.inMilliseconds.clamp(0, dur.inMilliseconds).toDouble()
+                          ? pos.inMilliseconds
+                                .clamp(0, dur.inMilliseconds)
+                                .toDouble()
                           : 0,
-                      max: dur.inMilliseconds > 0 ? dur.inMilliseconds.toDouble() : 1,
-                      onChanged: (v) => _ctrl.seek(Duration(milliseconds: v.toInt())),
+                      max: dur.inMilliseconds > 0
+                          ? dur.inMilliseconds.toDouble()
+                          : 1,
+                      onChanged: (v) =>
+                          _ctrl.seek(Duration(milliseconds: v.toInt())),
                     ),
                   ),
                   Text(_fmt(dur), style: textStyle),

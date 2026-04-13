@@ -72,6 +72,7 @@ class FlutterCacheVideoPlayerController {
     _disposers.add(
       effect(() {
         final position = _nativeController.positionSignal.value;
+        if (!_hasPlayedSinceOpen) return;
         state.position.value = position;
       }),
     );
@@ -79,6 +80,7 @@ class FlutterCacheVideoPlayerController {
     _disposers.add(
       effect(() {
         final duration = _nativeController.durationSignal.value;
+        if (!_hasPlayedSinceOpen) return;
         state.duration.value = duration;
       }),
     );
@@ -86,6 +88,7 @@ class FlutterCacheVideoPlayerController {
     _disposers.add(
       effect(() {
         final buffering = _nativeController.bufferingSignal.value;
+        if (!_hasPlayedSinceOpen) return;
         state.isBuffering.value = buffering;
       }),
     );

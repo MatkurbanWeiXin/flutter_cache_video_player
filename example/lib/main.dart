@@ -32,15 +32,18 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
       await _app.init();
       _app.playlistController.setPlaylist([
         const PlaylistItem(
-          url: 'https://videos.pexels.com/video-files/33538187/14261042_1080_1920_60fps.mp4',
+          url:
+              'https://videos.pexels.com/video-files/33538187/14261042_1080_1920_60fps.mp4',
           title: 'Test Video 1',
         ),
         const PlaylistItem(
-          url: 'https://videos.pexels.com/video-files/29603233/12740435_3840_2160_30fps.mp4',
+          url:
+              'https://videos.pexels.com/video-files/29603233/12740435_3840_2160_30fps.mp4',
           title: 'Test Video 2',
         ),
         const PlaylistItem(
-          url: 'https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4',
+          url:
+              'https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4',
           title: 'Butterfly',
         ),
       ]);

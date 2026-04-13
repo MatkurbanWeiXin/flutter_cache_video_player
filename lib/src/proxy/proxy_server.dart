@@ -236,16 +236,34 @@ class ProxyCacheServer {
     // 只等待下载完成/失败，不再订阅 progressStream 收集原始字节。
     // Only wait for completion/failure — no longer subscribing to progressStream for raw bytes.
     final dataCompleter = Completer<void>();
+    final expectedUrlHash = media.urlHash;
 
+    // effect() 会立即以当前信号值执行一次。跳过首次执行以防止来自
+    // 前一个下载会话的残留值误触发 Completer。
+    // effect() runs immediately with the current signal value. Skip the first
+    // invocation to prevent stale values from a previous download session
+    // from prematurely resolving the Completer.
+    var completeInitial = true;
     final completeDisposer = effect(() {
       final e = downloadManager.latestCompletion.value;
+      if (completeInitial) {
+        completeInitial = false;
+        return;
+      }
+      if (downloadManager.currentUrlHash != expectedUrlHash) return;
       if (e != null && e.chunkIndex == chunkIndex && !dataCompleter.isCompleted) {
         dataCompleter.complete();
       }
     });
 
+    var failInitial = true;
     final failDisposer = effect(() {
       final e = downloadManager.latestFailure.value;
+      if (failInitial) {
+        failInitial = false;
+        return;
+      }
+      if (downloadManager.currentUrlHash != expectedUrlHash) return;
       if (e != null && e.chunkIndex == chunkIndex && !dataCompleter.isCompleted) {
         dataCompleter.completeError(Exception('Download failed: ${e.errorMessage}'));
       }

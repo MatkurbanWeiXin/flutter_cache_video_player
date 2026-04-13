@@ -64,7 +64,10 @@ class _PlaylistSectionState extends State<PlaylistSection> with SignalsMixin {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: active
-                      ? TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold)
+                      ? TextStyle(
+                          color: theme.colorScheme.primary,
+                          fontWeight: FontWeight.bold,
+                        )
                       : null,
                 ),
                 onTap: () => _mgr.playIndex(index),
@@ -79,14 +82,20 @@ class _PlaylistSectionState extends State<PlaylistSection> with SignalsMixin {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               IconButton(
-                icon: Icon(Icons.shuffle, color: shuffleOn ? theme.colorScheme.primary : null),
+                icon: Icon(
+                  Icons.shuffle,
+                  color: shuffleOn ? theme.colorScheme.primary : null,
+                ),
                 onPressed: () {
                   _mgr.toggleShuffle();
                   _shuffle.value = _mgr.shuffle;
                 },
               ),
               IconButton(
-                icon: Icon(Icons.repeat, color: repeatOn ? theme.colorScheme.primary : null),
+                icon: Icon(
+                  Icons.repeat,
+                  color: repeatOn ? theme.colorScheme.primary : null,
+                ),
                 onPressed: () {
                   _mgr.toggleRepeat();
                   _repeat.value = _mgr.repeat;
