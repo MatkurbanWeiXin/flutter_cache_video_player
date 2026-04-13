@@ -68,8 +68,14 @@ static int64_t GetIntArg(
 // NativeVideoPlayer
 // ══════════════════════════════════════════════════════════════════
 
-NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar)
-    : texture_registrar_(registrar) {
+// 自定义窗口消息，用于通知平台线程有待处理的事件。
+// Custom window message to notify the platform thread of pending events.
+static constexpr UINT WM_DRAIN_EVENTS = WM_APP + 0x100;
+
+NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar,
+                                      HWND hwnd)
+    : texture_registrar_(registrar), hwnd_(hwnd) {
+  platform_thread_id_ = GetCurrentThreadId();
   MFStartup(MF_VERSION);
   InitD3D();
   InitMediaEngine();
@@ -273,12 +279,42 @@ void CALLBACK NativeVideoPlayer::OnTimer(PVOID ctx, BOOLEAN) {
 
 void NativeVideoPlayer::SendEvent(const std::string& name,
                                    const flutter::EncodableValue& val) {
-  std::lock_guard<std::mutex> lock(sink_mutex_);
-  if (!event_sink_) return;
   flutter::EncodableMap m;
   m[flutter::EncodableValue("event")] = flutter::EncodableValue(name);
   m[flutter::EncodableValue("value")] = val;
-  event_sink_->Success(flutter::EncodableValue(m));
+
+  if (GetCurrentThreadId() == platform_thread_id_) {
+    // 已在平台线程上，直接发送。 / Already on the platform thread — send directly.
+    std::lock_guard<std::mutex> lock(sink_mutex_);
+    if (event_sink_) {
+      event_sink_->Success(flutter::EncodableValue(m));
+    }
+  } else {
+    // 从后台线程入队，通知平台线程分发。
+    // Enqueue from background thread; notify platform thread to drain.
+    {
+      std::lock_guard<std::mutex> lock(event_queue_mutex_);
+      pending_events_.push(flutter::EncodableValue(m));
+    }
+    if (hwnd_) {
+      PostMessage(hwnd_, WM_DRAIN_EVENTS, 0, 0);
+    }
+  }
+}
+
+void NativeVideoPlayer::DrainEvents() {
+  std::queue<flutter::EncodableValue> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    std::swap(snapshot, pending_events_);
+  }
+  std::lock_guard<std::mutex> lock(sink_mutex_);
+  while (!snapshot.empty()) {
+    if (event_sink_) {
+      event_sink_->Success(snapshot.front());
+    }
+    snapshot.pop();
+  }
 }
 
 void NativeVideoPlayer::SetEventSink(
@@ -400,13 +436,23 @@ class EventHandler
 void FlutterCacheVideoPlayerPlugin::RegisterWithRegistrar(
     flutter::PluginRegistrarWindows* registrar) {
   auto plugin = std::make_unique<FlutterCacheVideoPlayerPlugin>(
-      registrar->texture_registrar(), registrar->messenger());
+      registrar, registrar->texture_registrar(), registrar->messenger());
   registrar->AddPlugin(std::move(plugin));
 }
 
 FlutterCacheVideoPlayerPlugin::FlutterCacheVideoPlayerPlugin(
-    flutter::TextureRegistrar* tex, flutter::BinaryMessenger* messenger) {
-  player_ = std::make_unique<NativeVideoPlayer>(tex);
+    flutter::PluginRegistrarWindows* registrar,
+    flutter::TextureRegistrar* tex, flutter::BinaryMessenger* messenger)
+    : registrar_(registrar) {
+  HWND hwnd = registrar->GetView()->GetNativeWindow();
+  player_ = std::make_unique<NativeVideoPlayer>(tex, hwnd);
+
+  // 注册窗口消息回调，处理来自后台线程的事件分发请求。
+  // Register window proc delegate to drain events posted from background threads.
+  window_proc_id_ = registrar->RegisterTopLevelWindowProcDelegate(
+      [this](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+        return HandleWindowMessage(hwnd, message, wparam, lparam);
+      });
 
   method_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -428,7 +474,20 @@ FlutterCacheVideoPlayerPlugin::FlutterCacheVideoPlayerPlugin(
       [p]() { p->SetEventSink(nullptr); }));
 }
 
-FlutterCacheVideoPlayerPlugin::~FlutterCacheVideoPlayerPlugin() = default;
+FlutterCacheVideoPlayerPlugin::~FlutterCacheVideoPlayerPlugin() {
+  if (window_proc_id_ != -1 && registrar_) {
+    registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_id_);
+  }
+}
+
+std::optional<LRESULT> FlutterCacheVideoPlayerPlugin::HandleWindowMessage(
+    HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_DRAIN_EVENTS && player_) {
+    player_->DrainEvents();
+    return 0;
+  }
+  return std::nullopt;
+}
 
 void FlutterCacheVideoPlayerPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
