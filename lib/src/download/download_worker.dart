@@ -82,20 +82,27 @@ class DownloadWorkerEntry {
 
       final stream = response.data!.stream;
 
+      // 节流进度事件：最多每 200ms 发送一次，避免信号洪泛。
+      // Throttle progress events to at most once per 200ms to prevent signal flooding.
+      var lastProgressTime = DateTime.now().millisecondsSinceEpoch;
+      const progressIntervalMs = 200;
+
       await for (final chunk in stream) {
         if (cancelToken.isCancelled) break;
 
         await raf.writeFrom(chunk);
         totalDownloaded += chunk.length;
 
-        // 只发送进度元数据，不传输原始字节——数据已写入磁盘。
-        // Send progress metadata only — raw bytes are already on disk.
-        sendPort.send({
-          'event': 'progress',
-          'chunk_index': chunkIndex,
-          'downloaded_bytes': totalDownloaded,
-          'total_bytes': expectedBytes,
-        });
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now - lastProgressTime >= progressIntervalMs) {
+          lastProgressTime = now;
+          sendPort.send({
+            'event': 'progress',
+            'chunk_index': chunkIndex,
+            'downloaded_bytes': totalDownloaded,
+            'total_bytes': expectedBytes,
+          });
+        }
       }
 
       await raf.close();

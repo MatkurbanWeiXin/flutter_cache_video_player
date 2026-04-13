@@ -33,10 +33,8 @@ class DownloadManager {
   /// The URL hash of the currently downloading media; updated on video switch.
   String? get currentUrlHash => _currentUrlHash;
 
-  final latestProgress = signal<ChunkProgress?>(null);
   final latestCompletion = signal<ChunkCompleted?>(null);
   final latestFailure = signal<ChunkFailed?>(null);
-  final latestMediaComplete = signal<String?>(null);
 
   final Map<int, int> _retryCount = {};
 
@@ -65,7 +63,8 @@ class DownloadManager {
   void _onWorkerEvent(WorkerEvent event) {
     switch (event) {
       case ChunkProgress():
-        latestProgress.set(event, force: true);
+        // 进度事件已在 WorkerPool 层过滤，不再传播到信号链。
+        // Progress events are filtered at the WorkerPool layer.
         break;
       case ChunkCompleted():
         _onChunkCompleted(event);
@@ -106,7 +105,6 @@ class DownloadManager {
         final incomplete = _currentBitmap!.getIncompleteChunks(_currentMedia!.totalChunks);
         if (incomplete.isEmpty) {
           await cacheRepo.markCompleted(_currentUrlHash!);
-          latestMediaComplete.set(_currentUrlHash!, force: true);
           Logger.info('All chunks completed for $_currentUrlHash');
 
           // Trigger merge
@@ -162,7 +160,6 @@ class DownloadManager {
     // misread by newly created effect listeners in the proxy server.
     latestCompletion.value = null;
     latestFailure.value = null;
-    latestProgress.value = null;
 
     _currentUrlHash = media.urlHash;
     _currentMedia = media;

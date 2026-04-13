@@ -96,7 +96,13 @@ class DownloadWorkerPool {
         }
       }
     }
-    latestEvent.set(event, force: true);
+    // ChunkProgress 事件量极大（每个网络缓冲区一次），传播到信号链会
+    // 引发信号洪泛。仅转发完成/失败/取消/就绪等低频事件。
+    // ChunkProgress events are extremely frequent (one per network buffer).
+    // Only propagate low-frequency lifecycle events to the signal chain.
+    if (event is! ChunkProgress) {
+      latestEvent.set(event, force: true);
+    }
   }
 
   Future<void> _respawnWorker(int index) async {
