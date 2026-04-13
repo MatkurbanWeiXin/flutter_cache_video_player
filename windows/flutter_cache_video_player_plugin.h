@@ -94,6 +94,10 @@ class NativeVideoPlayer {
   void PollAndRender();
 
  private:
+  bool InitD3D();
+  bool InitMediaEngine();
+  bool EnsureRenderTarget(UINT w, UINT h);
+  void OnMediaEvent(DWORD event, DWORD_PTR p1, DWORD p2);
   void StartFrameTimer();
   void StopFrameTimer();
   void SendEvent(const std::string& name, const flutter::EncodableValue& val);
