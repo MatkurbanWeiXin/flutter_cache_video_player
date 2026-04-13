@@ -19,16 +19,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <vector>
 
 namespace flutter_cache_video_player {
 
 using Microsoft::WRL::ComPtr;
-
-/// 平台线程轮询定时器 ID / Platform-thread poll timer ID
-static constexpr UINT_PTR kPollTimerId = 0xCAFE;
 
 /// IMFMediaEngineNotify 回调实现，将媒体引擎事件转发给回调函数。
 /// IMFMediaEngineNotify callback forwarding media engine events to a callback.
@@ -72,7 +68,7 @@ class MediaEngineNotify : public IMFMediaEngineNotify {
 /// and PixelBufferTexture for rendering to Flutter.
 class NativeVideoPlayer {
  public:
-  NativeVideoPlayer(flutter::TextureRegistrar* registrar, HWND hwnd);
+  NativeVideoPlayer(flutter::TextureRegistrar* registrar);
   ~NativeVideoPlayer();
 
   int64_t Create();
@@ -87,23 +83,19 @@ class NativeVideoPlayer {
   void SetEventSink(
       std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> sink);
 
-  /// 平台线程定时器回调，轮询引擎状态并提取帧。
-  /// Platform-thread timer callback: polls engine state and extracts frames.
-  void OnPollTimer();
-
  private:
   bool InitD3D();
   bool InitMediaEngine();
   bool EnsureRenderTarget(UINT w, UINT h);
   void OnMediaEvent(DWORD event, DWORD_PTR p1, DWORD p2);
-  void UpdateFrame();
-  void StartPollTimer();
-  void StopPollTimer();
+  void PollAndRender();
+  void StartFrameTimer();
+  void StopFrameTimer();
+  static void CALLBACK OnTimer(PVOID ctx, BOOLEAN fired);
   void SendEvent(const std::string& name, const flutter::EncodableValue& val);
   void Cleanup();
 
   flutter::TextureRegistrar* texture_registrar_;
-  HWND hwnd_ = nullptr;
   int64_t texture_id_ = -1;
   std::unique_ptr<flutter::TextureVariant> texture_variant_;
 
@@ -121,14 +113,14 @@ class NativeVideoPlayer {
   FlutterDesktopPixelBuffer pixel_buf_{};
   std::mutex buf_mutex_;
 
-  bool poll_timer_active_ = false;
+  HANDLE timer_handle_ = nullptr;
   UINT video_w_ = 0;
   UINT video_h_ = 0;
   UINT reset_token_ = 0;
   int frame_count_ = 0;
   bool duration_sent_ = false;
   bool last_buffering_ = true;
-  bool last_paused_ = true;
+  bool last_playing_ = false;
   bool last_ended_ = false;
 };
 
@@ -139,8 +131,7 @@ class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
   static void RegisterWithRegistrar(
       flutter::PluginRegistrarWindows* registrar);
 
-  FlutterCacheVideoPlayerPlugin(flutter::PluginRegistrarWindows* registrar,
-                                 flutter::TextureRegistrar* tex_registrar,
+  FlutterCacheVideoPlayerPlugin(flutter::TextureRegistrar* tex_registrar,
                                  flutter::BinaryMessenger* messenger);
   virtual ~FlutterCacheVideoPlayerPlugin();
 
@@ -153,13 +144,6 @@ class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
-  /// WndProc 回调，处理平台线程 WM_TIMER 消息。
-  /// WndProc callback for handling WM_TIMER on the platform thread.
-  std::optional<LRESULT> HandleWindowMessage(HWND hwnd, UINT message,
-                                              WPARAM wparam, LPARAM lparam);
-
-  flutter::PluginRegistrarWindows* registrar_;
-  int window_proc_id_ = -1;
   std::unique_ptr<NativeVideoPlayer> player_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       method_channel_;
