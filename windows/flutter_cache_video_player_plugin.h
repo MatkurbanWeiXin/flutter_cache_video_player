@@ -105,6 +105,7 @@ class NativeVideoPlayer {
 
   flutter::TextureRegistrar* texture_registrar_;
   HWND hwnd_ = nullptr;
+  HWND msg_hwnd_ = nullptr;
   DWORD platform_thread_id_ = 0;
   int64_t texture_id_ = -1;
   std::unique_ptr<flutter::TextureVariant> texture_variant_;

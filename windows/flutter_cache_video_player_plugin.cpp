@@ -76,6 +76,36 @@ static constexpr UINT WM_DRAIN_EVENTS = WM_APP + 0x100;
 // SetTimer ID for WM_TIMER messages driving PollAndRender.
 static constexpr UINT_PTR kFrameTimerId = 1;
 
+// ── 隐藏消息窗口 / Hidden message-only window ──
+//
+// 不依赖 Flutter 的 TopLevelWindowProcDelegate 转发 WM_TIMER / WM_DRAIN_EVENTS，
+// 而是创建一个我们完全控制的 HWND_MESSAGE 隐藏窗口。
+// SetTimer 和 PostMessage 目标均为该窗口，确保消息可靠送达。
+// Instead of relying on Flutter's TopLevelWindowProcDelegate to forward
+// WM_TIMER / WM_DRAIN_EVENTS, we create a hidden HWND_MESSAGE window that
+// we fully control. SetTimer and PostMessage target this window so messages
+// are reliably delivered.
+
+static constexpr wchar_t kMsgWindowClass[] =
+    L"FlutterCacheVideoPlayerMsg";
+
+static LRESULT CALLBACK MsgWndProc(HWND hwnd, UINT message,
+                                    WPARAM wparam, LPARAM lparam) {
+  auto* player = reinterpret_cast<NativeVideoPlayer*>(
+      GetWindowLongPtr(hwnd, GWLP_USERDATA));
+  if (player) {
+    if (message == WM_TIMER && wparam == kFrameTimerId) {
+      player->PollAndRender();
+      return 0;
+    }
+    if (message == WM_DRAIN_EVENTS) {
+      player->DrainEvents();
+      return 0;
+    }
+  }
+  return DefWindowProc(hwnd, message, wparam, lparam);
+}
+
 NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar,
                                       HWND hwnd)
     : texture_registrar_(registrar) {
@@ -88,6 +118,25 @@ NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar,
   hwnd_ = GetAncestor(hwnd, GA_ROOT);
   if (!hwnd_) hwnd_ = hwnd;
   platform_thread_id_ = GetCurrentThreadId();
+
+  // 创建隐藏消息窗口，拥有定时器和接收跨线程 PostMessage。
+  // Create hidden message-only window to own timers and receive cross-thread PostMessage.
+  static bool class_registered = false;
+  if (!class_registered) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = MsgWndProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.lpszClassName = kMsgWindowClass;
+    RegisterClassExW(&wc);
+    class_registered = true;
+  }
+  msg_hwnd_ = CreateWindowExW(0, kMsgWindowClass, L"", 0,
+                               0, 0, 0, 0, HWND_MESSAGE,
+                               nullptr, GetModuleHandle(nullptr), nullptr);
+  SetWindowLongPtr(msg_hwnd_, GWLP_USERDATA,
+                   reinterpret_cast<LONG_PTR>(this));
+
   // Flutter runner already called CoInitializeEx (STA). Don't override.
   MFStartup(MF_VERSION);
   if (!InitD3D()) {
@@ -331,11 +380,11 @@ void NativeVideoPlayer::PollAndRender() {
 
 void NativeVideoPlayer::StartFrameTimer() {
   StopFrameTimer();
-  ::SetTimer(hwnd_, kFrameTimerId, 16, nullptr);
+  ::SetTimer(msg_hwnd_, kFrameTimerId, 16, nullptr);
 }
 
 void NativeVideoPlayer::StopFrameTimer() {
-  ::KillTimer(hwnd_, kFrameTimerId);
+  ::KillTimer(msg_hwnd_, kFrameTimerId);
 }
 
 // ── 事件发送（线程安全） / Thread-safe event sending ──
@@ -367,7 +416,7 @@ void NativeVideoPlayer::SendEvent(const std::string& name,
     std::lock_guard<std::mutex> lock(event_queue_mutex_);
     pending_events_.push(std::move(ev));
   }
-  PostMessage(hwnd_, WM_DRAIN_EVENTS, 0, 0);
+  PostMessage(msg_hwnd_, WM_DRAIN_EVENTS, 0, 0);
 }
 
 void NativeVideoPlayer::DrainEvents() {
@@ -473,6 +522,11 @@ void NativeVideoPlayer::Dispose() {
 
 void NativeVideoPlayer::Cleanup() {
   StopFrameTimer();
+  if (msg_hwnd_) {
+    SetWindowLongPtr(msg_hwnd_, GWLP_USERDATA, 0);
+    DestroyWindow(msg_hwnd_);
+    msg_hwnd_ = nullptr;
+  }
   if (media_engine_) {
     media_engine_->Shutdown();
     media_engine_.Reset();
@@ -568,14 +622,8 @@ FlutterCacheVideoPlayerPlugin::~FlutterCacheVideoPlayerPlugin() {
 
 std::optional<LRESULT> FlutterCacheVideoPlayerPlugin::HandleWindowMessage(
     HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-  if (message == WM_DRAIN_EVENTS && player_) {
-    player_->DrainEvents();
-    return 0;
-  }
-  if (message == WM_TIMER && wparam == kFrameTimerId && player_) {
-    player_->PollAndRender();
-    return 0;
-  }
+  // 定时器和事件分发已由 NativeVideoPlayer 的隐藏消息窗口处理。
+  // Timer and event dispatch are handled by NativeVideoPlayer's hidden msg window.
   return std::nullopt;
 }
 
