@@ -19,6 +19,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <queue>
 #include <string>
 #include <vector>
 
@@ -68,7 +70,7 @@ class MediaEngineNotify : public IMFMediaEngineNotify {
 /// and PixelBufferTexture for rendering to Flutter.
 class NativeVideoPlayer {
  public:
-  NativeVideoPlayer(flutter::TextureRegistrar* registrar);
+  NativeVideoPlayer(flutter::TextureRegistrar* registrar, HWND hwnd);
   ~NativeVideoPlayer();
 
   int64_t Create();
@@ -83,6 +85,10 @@ class NativeVideoPlayer {
   void SetEventSink(
       std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> sink);
 
+  /// 在平台线程上分发队列中的事件（由 WndProc 代理调用）。
+  /// Drains pending events on the platform thread (called from WndProc delegate).
+  void DrainEvents();
+
  private:
   bool InitD3D();
   bool InitMediaEngine();
@@ -96,6 +102,8 @@ class NativeVideoPlayer {
   void Cleanup();
 
   flutter::TextureRegistrar* texture_registrar_;
+  HWND hwnd_ = nullptr;
+  DWORD platform_thread_id_ = 0;
   int64_t texture_id_ = -1;
   std::unique_ptr<flutter::TextureVariant> texture_variant_;
 
@@ -108,6 +116,11 @@ class NativeVideoPlayer {
 
   std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
   std::mutex sink_mutex_;
+
+  /// 线程安全的事件队列，从定时器线程入队，在平台线程出队。
+  /// Thread-safe event queue: enqueued from the timer thread, drained on the platform thread.
+  std::queue<flutter::EncodableValue> pending_events_;
+  std::mutex event_queue_mutex_;
 
   std::vector<uint8_t> pixel_data_;
   FlutterDesktopPixelBuffer pixel_buf_{};
@@ -131,7 +144,8 @@ class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
   static void RegisterWithRegistrar(
       flutter::PluginRegistrarWindows* registrar);
 
-  FlutterCacheVideoPlayerPlugin(flutter::TextureRegistrar* tex_registrar,
+  FlutterCacheVideoPlayerPlugin(flutter::PluginRegistrarWindows* registrar,
+                                 flutter::TextureRegistrar* tex_registrar,
                                  flutter::BinaryMessenger* messenger);
   virtual ~FlutterCacheVideoPlayerPlugin();
 
@@ -144,6 +158,13 @@ class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
+  /// WndProc 回调，处理平台线程上的事件分发消息。
+  /// WndProc callback for handling event drain messages on the platform thread.
+  std::optional<LRESULT> HandleWindowMessage(HWND hwnd, UINT message,
+                                              WPARAM wparam, LPARAM lparam);
+
+  flutter::PluginRegistrarWindows* registrar_;
+  int window_proc_id_ = -1;
   std::unique_ptr<NativeVideoPlayer> player_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       method_channel_;
