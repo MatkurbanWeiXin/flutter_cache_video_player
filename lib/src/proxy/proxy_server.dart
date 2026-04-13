@@ -233,22 +233,33 @@ class ProxyCacheServer {
     // Race-condition guard: the chunk may have completed between the bitmap
     // read in _serveChunks and the stream subscriptions above.  Re-check on
     // disk so we don't wait for an event that already fired.
+    // Also check the merged file: after ChunkMerger runs, individual chunk
+    // files are deleted and replaced by a single merged file.
     final chunkPath = '${media.localDir}/${FileUtils.chunkFileName(chunkIndex)}';
-    final chunkFile = File(chunkPath);
-    if (await chunkFile.exists()) {
+    final mergedPath = '${media.localDir}/${FileUtils.mergedFileName()}';
+    if (await File(chunkPath).exists() || await File(mergedPath).exists()) {
       if (!dataCompleter.isCompleted) dataCompleter.complete();
     }
 
     try {
       await dataCompleter.future.timeout(const Duration(seconds: 30));
 
-      // 下载完成后，直接从磁盘读取精确字节范围。
-      // After download completes, read the exact byte range from disk.
-      final file = File(chunkPath);
+      // 下载完成后，直接从磁盘读取精确字节范围（支持合并文件回退）。
+      // After download completes, read the exact byte range from disk (with merged file fallback).
+      File file = File(chunkPath);
+      int offset = readStart;
+
+      if (!await file.exists()) {
+        // 分片文件已被合并，改从合并文件读取。
+        // Chunk file has been merged; read from the merged file instead.
+        file = File(mergedPath);
+        offset = chunkIndex * config.chunkSize + readStart;
+      }
+
       if (await file.exists()) {
         final raf = await file.open(mode: FileMode.read);
         try {
-          await raf.setPosition(readStart);
+          await raf.setPosition(offset);
           final length = readEnd - readStart + 1;
           final data = await raf.read(length);
           controller.add(data);

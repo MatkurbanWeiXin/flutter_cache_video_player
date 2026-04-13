@@ -23,6 +23,12 @@ class PlayerService {
   late final NativePlayerController _controller;
   final List<StreamSubscription> _subscriptions = [];
 
+  /// 防止旧媒体的残留事件干扰新媒体的状态。open() 时重置为 false，
+  /// 收到新媒体的 playing(true) 后置为 true。
+  /// Guards against stale native events from the previous media session.
+  /// Reset to false on open(), set to true when playing(true) is received.
+  bool _hasPlayedSinceOpen = false;
+
   PlayerService({
     required this.config,
     required this.playerFactory,
@@ -51,6 +57,14 @@ class PlayerService {
   void _setupListeners() {
     _subscriptions.add(
       _controller.playingStream.listen((playing) {
+        if (playing) {
+          _hasPlayedSinceOpen = true;
+        } else if (!_hasPlayedSinceOpen) {
+          // 忽略旧媒体残留的 paused 事件。
+          // Ignore stale paused event from a previous media session.
+          Logger.warning('Ignoring stale paused event before first playing(true)');
+          return;
+        }
         state.setPlayState(playing ? PlayState.playing : PlayState.paused);
       }),
     );
@@ -58,11 +72,11 @@ class PlayerService {
     _subscriptions.add(
       _controller.positionStream.listen((position) {
         state.setPosition(position);
-
-        if (state.currentUrl != null) {
-          final byteOffset = _estimateByteOffset(position);
-          downloadManager.onSeek(byteOffset);
-        }
+        // 注意：不在此处调用 downloadManager.onSeek()，仅在用户主动 seek 时调用。
+        // 每 200ms 的位置更新若触发 onSeek 会持续取消下载工作线程，导致分片永远无法完成。
+        // Note: do NOT call downloadManager.onSeek() here. Only call it on
+        // explicit user seeks. Position updates fire every ~200ms and onSeek()
+        // cancels all active workers, preventing chunks from ever completing.
       }),
     );
 
@@ -87,6 +101,12 @@ class PlayerService {
 
     _subscriptions.add(
       _controller.completedStream.listen((_) {
+        if (!_hasPlayedSinceOpen) {
+          // 旧媒体的 completed 事件在新媒体 open() 后到达——忽略。
+          // Stale completed event from the previous media arrived after open() — ignore.
+          Logger.warning('Ignoring stale completed event before first playing(true)');
+          return;
+        }
         Logger.info('Playback completed');
         state.setPlayState(PlayState.stopped);
       }),
@@ -104,6 +124,7 @@ class PlayerService {
     try {
       await _saveCurrentPosition();
 
+      _hasPlayedSinceOpen = false;
       state.reset();
       state.setCurrentUrl(url);
 
@@ -156,7 +177,13 @@ class PlayerService {
 
   /// 跳转到指定位置。
   /// Seek to the specified position.
-  Future<void> seek(Duration position) => _controller.seek(position.inMilliseconds);
+  Future<void> seek(Duration position) async {
+    await _controller.seek(position.inMilliseconds);
+    if (state.currentUrl != null) {
+      final byteOffset = _estimateByteOffset(position);
+      downloadManager.onSeek(byteOffset);
+    }
+  }
 
   /// 设置音量（0.0 ~ 1.0）。
   /// Sets the volume (0.0 – 1.0).
