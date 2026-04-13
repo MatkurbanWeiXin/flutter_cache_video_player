@@ -4,9 +4,11 @@
 /// Windows 视频播放器插件，基于 Media Foundation + D3D11 实现原生视频播放。
 /// Windows video player plugin using Media Foundation + D3D11 for native video playback.
 
+#include <flutter/encodable_value.h>
 #include <flutter/event_channel.h>
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
+#include <flutter/standard_method_codec.h>
 #include <flutter/texture_registrar.h>
 
 #include <d3d11.h>
@@ -95,7 +97,7 @@ class NativeVideoPlayer {
 
   flutter::TextureRegistrar* texture_registrar_;
   int64_t texture_id_ = -1;
-  std::unique_ptr<flutter::PixelBufferTexture> pixel_texture_;
+  std::unique_ptr<flutter::TextureVariant> texture_variant_;
 
   ComPtr<ID3D11Device> d3d_device_;
   ComPtr<ID3D11DeviceContext> d3d_context_;

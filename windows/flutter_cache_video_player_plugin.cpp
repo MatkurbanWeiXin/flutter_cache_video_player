@@ -290,13 +290,14 @@ void NativeVideoPlayer::SetEventSink(
 // ── 播放控制 / Playback control ──
 
 int64_t NativeVideoPlayer::Create() {
-  pixel_texture_ = std::make_unique<flutter::PixelBufferTexture>(
-      [this](size_t, size_t) -> const FlutterDesktopPixelBuffer* {
-        std::lock_guard<std::mutex> lock(buf_mutex_);
-        if (!pixel_buf_.buffer) return nullptr;
-        return &pixel_buf_;
-      });
-  texture_id_ = texture_registrar_->RegisterTexture(pixel_texture_.get());
+  texture_variant_ = std::make_unique<flutter::TextureVariant>(
+      flutter::PixelBufferTexture(
+          [this](size_t, size_t) -> const FlutterDesktopPixelBuffer* {
+            std::lock_guard<std::mutex> lock(buf_mutex_);
+            if (!pixel_buf_.buffer) return nullptr;
+            return &pixel_buf_;
+          }));
+  texture_id_ = texture_registrar_->RegisterTexture(texture_variant_.get());
   return texture_id_;
 }
 

@@ -35,6 +35,9 @@ add_library(${PLUGIN_NAME} SHARED
 # full control over build settings.
 apply_standard_settings(${PLUGIN_NAME})
 
+# Treat source files as UTF-8 to avoid C4819 warnings with Chinese comments.
+target_compile_options(${PLUGIN_NAME} PRIVATE /utf-8)
+
 # Symbols are hidden by default to reduce the chance of accidental conflicts
 # between plugins. This should not be removed; any symbols that should be
 # exported should be explicitly exported with the FLUTTER_PLUGIN_EXPORT macro.
@@ -92,6 +95,7 @@ add_executable(${TEST_RUNNER}
   ${PLUGIN_SOURCES}
 )
 apply_standard_settings(${TEST_RUNNER})
+target_compile_options(${TEST_RUNNER} PRIVATE /utf-8)
 target_include_directories(${TEST_RUNNER} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(${TEST_RUNNER} PRIVATE flutter_wrapper_plugin)
 target_link_libraries(${TEST_RUNNER} PRIVATE gtest_main gmock)
