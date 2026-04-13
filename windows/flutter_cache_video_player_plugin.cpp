@@ -84,7 +84,7 @@ NativeVideoPlayer::NativeVideoPlayer(flutter::TextureRegistrar* registrar,
   hwnd_ = GetAncestor(hwnd, GA_ROOT);
   if (!hwnd_) hwnd_ = hwnd;
   platform_thread_id_ = GetCurrentThreadId();
-  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  // Flutter runner already called CoInitializeEx (STA). Don't override.
   MFStartup(MF_VERSION);
   if (!InitD3D()) {
     SendEvent("error", flutter::EncodableValue("Failed to initialize D3D11"));
@@ -150,8 +150,7 @@ bool NativeVideoPlayer::InitMediaEngine() {
   attrs->SetUINT32(MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
                     DXGI_FORMAT_B8G8R8A8_UNORM);
 
-  hr = factory->CreateInstance(MF_MEDIA_ENGINE_WAITFORSTABLE_STATE,
-                                attrs.Get(),
+  hr = factory->CreateInstance(0, attrs.Get(),
                                 media_engine_.ReleaseAndGetAddressOf());
   notify->Release();
   return SUCCEEDED(hr);
@@ -195,10 +194,24 @@ bool NativeVideoPlayer::EnsureRenderTarget(UINT w, UINT h) {
 
 // ── 媒体引擎事件回调（仅保留接口） / Media engine event callback (interface-only) ──
 
-void NativeVideoPlayer::OnMediaEvent(DWORD event, DWORD_PTR, DWORD) {
-  // 所有状态通过 PollAndRender 在定时器线程上轮询，此回调仅保留以满足 IMFMediaEngineNotify 接口。
-  // All state is polled via PollAndRender on the timer thread.
-  // This callback is kept only to satisfy the IMFMediaEngineNotify interface.
+void NativeVideoPlayer::OnMediaEvent(DWORD event, DWORD_PTR p1, DWORD p2) {
+  // 安全网：如果仍以 WAITFORSTABLE_STATE 模式创建，立即解除阻塞。
+  // Safety net: if engine was created with WAITFORSTABLE_STATE, unblock it.
+  if (event == MF_MEDIA_ENGINE_EVENT_NOTIFYSTABLESTATE) {
+    HANDLE h = reinterpret_cast<HANDLE>(p1);
+    if (h) SetEvent(h);
+    return;
+  }
+
+  // 媒体引擎报告错误时立即上报 Dart 端。
+  // When the media engine reports an error, forward it to Dart immediately.
+  if (event == MF_MEDIA_ENGINE_EVENT_ERROR) {
+    auto code = static_cast<int>(p1);
+    std::ostringstream oss;
+    oss << "MediaEngine error: code=" << code
+        << ", hr=0x" << std::hex << p2;
+    SendEvent("error", flutter::EncodableValue(oss.str()));
+  }
 }
 
 // ── 定时器轮询：检测引擎状态变化并提取帧 / Timer poll: detect engine state changes and extract frames ──
@@ -405,9 +418,23 @@ void NativeVideoPlayer::Open(const std::string& url) {
   last_ended_ = false;
 
   BSTR bstr = SysAllocString(Utf8ToWide(url).c_str());
-  media_engine_->SetSource(bstr);
+  HRESULT hr = media_engine_->SetSource(bstr);
   SysFreeString(bstr);
-  media_engine_->Load();
+  if (FAILED(hr)) {
+    std::ostringstream oss;
+    oss << "SetSource failed: hr=0x" << std::hex << hr;
+    SendEvent("error", flutter::EncodableValue(oss.str()));
+    return;
+  }
+
+  hr = media_engine_->Load();
+  if (FAILED(hr)) {
+    std::ostringstream oss;
+    oss << "Load failed: hr=0x" << std::hex << hr;
+    SendEvent("error", flutter::EncodableValue(oss.str()));
+    return;
+  }
+
   // Load 后立即调用 Play()，媒体引擎会在准备就绪后自动开始播放。
   // Call Play() right after Load(). The media engine will auto-play once ready.
   media_engine_->Play();

@@ -57,6 +57,9 @@ class ProxyCacheServer {
       return Response(400, body: 'Missing url parameter');
     }
 
+    final rangeHeader = request.headers['range'];
+    Logger.info('Proxy request: ${request.method} range=$rangeHeader');
+
     try {
       return await _handleStreamRequest(request, url);
     } catch (e, st) {
