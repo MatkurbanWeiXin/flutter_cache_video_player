@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:typed_data';
-import 'package:signals/signals.dart';
+import 'package:signals_flutter/signals_flutter.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import '../core/platform_detector.dart';
@@ -17,16 +17,23 @@ import 'chunk_merger.dart';
 /// Download manager handling task scheduling, priority queueing, retries, and chunk merging.
 class DownloadManager {
   final CacheConfig config;
+
   final CacheRepository cacheRepo;
+
   late final DownloadWorkerPool _pool;
+
   final _taskQueue = SplayTreeSet<DownloadTask>((a, b) {
     final cmp = a.priority.index.compareTo(b.priority.index);
     if (cmp != 0) return cmp;
     return a.chunkIndex.compareTo(b.chunkIndex);
   });
+
   void Function()? _eventEffectDisposer;
+
   String? _currentUrlHash;
+
   MediaIndex? _currentMedia;
+
   ChunkBitmap? _currentBitmap;
 
   /// 当前正在下载的媒体 URL 哈希，切换视频后会更新。
@@ -34,6 +41,7 @@ class DownloadManager {
   String? get currentUrlHash => _currentUrlHash;
 
   final latestCompletion = signal<ChunkCompleted?>(null);
+
   final latestFailure = signal<ChunkFailed?>(null);
 
   final Map<int, int> _retryCount = {};

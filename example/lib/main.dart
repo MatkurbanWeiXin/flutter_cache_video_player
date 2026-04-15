@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_cache_video_player/flutter_cache_video_player.dart';
 import 'package:signals/signals_flutter.dart';
 
-import 'pages/player_page.dart';
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const ExampleApp());
@@ -21,6 +19,12 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
   late final _ready = createSignal(false);
   late final _error = createSignal<String?>(null);
 
+  final FlutterSignal<List<String>> playList = signal([
+    'https://videos.pexels.com/video-files/33538187/14261042_1080_1920_60fps.mp4',
+    'https://videos.pexels.com/video-files/29603233/12740435_3840_2160_30fps.mp4',
+    'https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4',
+  ]);
+
   @override
   void initState() {
     super.initState();
@@ -29,25 +33,7 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
 
   Future<void> _initApp() async {
     try {
-      await _app.init();
-      _app.playlistController.setPlaylist([
-        const PlaylistItem(
-          url:
-              'https://videos.pexels.com/video-files/33538187/14261042_1080_1920_60fps.mp4',
-          title: 'Test Video 1',
-        ),
-        const PlaylistItem(
-          url:
-              'https://videos.pexels.com/video-files/29603233/12740435_3840_2160_30fps.mp4',
-          title: 'Test Video 2',
-        ),
-        const PlaylistItem(
-          url:
-              'https://flutter.github.io/assets-for-api-docs/assets/videos/butterfly.mp4',
-          title: 'Butterfly',
-        ),
-      ]);
-      await _app.playlistController.playIndex(0);
+      FlutterCacheVideoPlayer.instance.initialize();
       _ready.value = true;
     } catch (e) {
       _error.value = e.toString();
@@ -82,7 +68,7 @@ class _ExampleAppState extends State<ExampleApp> with SignalsMixin {
     } else if (!ready) {
       home = const Scaffold(body: Center(child: CircularProgressIndicator()));
     } else {
-      home = PlayerPage(app: _app);
+      home = SizedBox();
     }
 
     return MaterialApp(

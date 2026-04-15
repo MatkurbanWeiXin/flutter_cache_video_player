@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
-import 'package:signals/signals.dart';
+import 'package:signals_flutter/signals_flutter.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import '../data/models/media_index.dart';

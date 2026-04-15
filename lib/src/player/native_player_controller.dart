@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
-import 'package:signals/signals.dart';
+import 'package:signals_flutter/signals_flutter.dart';
 import '../core/logger.dart';
 
 /// 原生播放器控制器，通过 MethodChannel 和 EventChannel 与各平台原生播放器通信。
@@ -13,10 +13,15 @@ class NativePlayerController {
   StreamSubscription? _eventSubscription;
 
   final positionSignal = signal(Duration.zero);
+
   final durationSignal = signal(Duration.zero);
+
   final playingSignal = signal(false);
+
   final bufferingSignal = signal(false);
+
   final errorSignal = signal<String?>(null);
+
   final completedSignal = signal(0);
 
   /// 原生纹理 ID，用于 Flutter Texture widget 渲染。

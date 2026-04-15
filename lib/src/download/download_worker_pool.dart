@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:isolate';
-import 'package:signals/signals.dart';
+import 'package:signals_flutter/signals_flutter.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import 'download_task.dart';

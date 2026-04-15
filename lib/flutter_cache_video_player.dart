@@ -7,6 +7,7 @@ export 'src/core/logger.dart';
 export 'src/data/models/media_index.dart';
 export 'src/data/models/chunk_bitmap.dart';
 export 'src/data/models/playback_history.dart';
+export 'src/data/enums/play_state.dart';
 
 // Data repositories
 export 'src/data/cache_index_db.dart';
@@ -23,13 +24,10 @@ export 'src/download/chunk_merger.dart';
 export 'src/proxy/proxy_server.dart';
 export 'src/proxy/range_handler.dart';
 export 'src/proxy/mime_detector.dart';
-export 'src/proxy/stream_splitter.dart';
 
 // Player
 export 'src/player/flutter_cache_video_player_controller.dart';
-export 'src/player/flutter_cache_video_player_state.dart';
 export 'src/player/platform_player_factory.dart';
-export 'src/player/flutter_cache_video_playlist_controller.dart';
 
 // UI
 export 'src/ui/flutter_cache_video_player_view.dart';

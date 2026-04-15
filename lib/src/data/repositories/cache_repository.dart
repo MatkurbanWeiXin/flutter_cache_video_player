@@ -1,3 +1,4 @@
+import 'package:flutter_cache_video_player/src/data/tables.dart';
 import 'package:tostore/tostore.dart';
 import '../../core/constants.dart';
 import '../../core/logger.dart';
@@ -27,7 +28,7 @@ class CacheRepository {
   /// 根据 URL 哈希查找媒体索引。
   /// Finds a media index by URL hash.
   Future<MediaIndex?> findByHash(String hash) async {
-    final result = await _db.query('media_index').whereEqual('url_hash', hash).first();
+    final result = await _db.query(TableName.mediaIndex).whereEqual('url_hash', hash).first();
     if (result == null) return null;
     return MediaIndex.fromMap(result);
   }
@@ -36,9 +37,9 @@ class CacheRepository {
   /// Creates a new media index and its empty bitmap within a transaction.
   Future<void> createMediaIndex(MediaIndex index) async {
     await _db.transaction(() async {
-      await _db.insert('media_index', index.toMap());
+      await _db.insert(TableName.mediaIndex, index.toMap());
       final bitmap = ChunkBitmap.empty(index.urlHash, index.totalChunks);
-      await _db.insert('chunk_bitmap', bitmap.toMap());
+      await _db.insert(TableName.chunkBitmap, bitmap.toMap());
     });
     Logger.info('Created media index: ${index.urlHash} (${index.totalChunks} chunks)');
   }
@@ -47,7 +48,7 @@ class CacheRepository {
   /// Updates the last-accessed timestamp for the specified media.
   Future<void> updateLastAccessed(String urlHash) async {
     await _db
-        .update('media_index', {'last_accessed': DateTime.now().millisecondsSinceEpoch})
+        .update(TableName.mediaIndex, {'last_accessed': DateTime.now().millisecondsSinceEpoch})
         .where('url_hash', '=', urlHash);
   }
 
@@ -55,7 +56,7 @@ class CacheRepository {
   /// Marks the specified media as fully downloaded.
   Future<void> markCompleted(String urlHash) async {
     await _db
-        .update('media_index', {
+        .update(TableName.mediaIndex, {
           'is_completed': 1,
           'last_accessed': DateTime.now().millisecondsSinceEpoch,
         })
@@ -66,7 +67,7 @@ class CacheRepository {
   /// 获取指定媒体的分片位图。
   /// Retrieves the chunk bitmap for the specified media.
   Future<ChunkBitmap?> getBitmap(String urlHash) async {
-    final result = await _db.query('chunk_bitmap').whereEqual('url_hash', urlHash).first();
+    final result = await _db.query(TableName.chunkBitmap).whereEqual('url_hash', urlHash).first();
     if (result == null) return null;
     return ChunkBitmap.fromMap(result);
   }
@@ -75,7 +76,7 @@ class CacheRepository {
   /// Updates the bitmap and downloaded-bytes count.
   Future<void> updateBitmap(ChunkBitmap bitmap) async {
     await _db
-        .update('chunk_bitmap', {
+        .update(TableName.chunkBitmap, {
           'bitmap': bitmap.bitmap,
           'downloaded_bytes': bitmap.downloadedBytes,
         })
@@ -85,26 +86,26 @@ class CacheRepository {
   /// 监听指定媒体位图变化的实时流。
   /// Returns a live stream of bitmap changes for the specified media.
   Stream<List<Map<String, dynamic>>> watchBitmap(String urlHash) {
-    return _db.query('chunk_bitmap').whereEqual('url_hash', urlHash).watch();
+    return _db.query(TableName.chunkBitmap).whereEqual('url_hash', urlHash).watch();
   }
 
   /// 监听指定媒体索引变化的实时流。
   /// Returns a live stream of media index changes.
   Stream<List<Map<String, dynamic>>> watchMediaIndex(String urlHash) {
-    return _db.query('media_index').whereEqual('url_hash', urlHash).watch();
+    return _db.query(TableName.mediaIndex).whereEqual('url_hash', urlHash).watch();
   }
 
   /// 获取所有媒体索引，按最近访问时间降序排列。
   /// Returns all media indices sorted by last-accessed time descending.
   Future<List<MediaIndex>> getAllMedia() async {
-    final results = await _db.query('media_index').orderByDesc('last_accessed');
+    final results = await _db.query(TableName.mediaIndex).orderByDesc('last_accessed');
     return results.data.map((m) => MediaIndex.fromMap(m)).toList();
   }
 
   /// 计算当前缓存总大小（字节）。
   /// Calculates the total cache size in bytes.
   Future<int> getTotalCacheSize() async {
-    final results = await _db.query('chunk_bitmap');
+    final results = await _db.query(TableName.chunkBitmap);
     int total = 0;
     for (final r in results.data) {
       total += (r['downloaded_bytes'] as int?) ?? 0;
@@ -122,7 +123,7 @@ class CacheRepository {
 
     Logger.info('LRU eviction: need to free $needToFree bytes');
 
-    final candidates = await _db.query('media_index').orderByAsc('last_accessed');
+    final candidates = await _db.query(TableName.mediaIndex).orderByAsc('last_accessed');
 
     for (final candidate in candidates.data) {
       if (needToFree <= 0) break;
@@ -142,9 +143,9 @@ class CacheRepository {
       await FileUtils.deleteDirectory(index.localDir);
     }
     await _db.transaction(() async {
-      await _db.delete('chunk_bitmap').where('url_hash', '=', urlHash);
-      await _db.delete('playback_history').where('url_hash', '=', urlHash);
-      await _db.delete('media_index').where('url_hash', '=', urlHash);
+      await _db.delete(TableName.chunkBitmap).where('url_hash', '=', urlHash);
+      await _db.delete(TableName.playbackHistory).where('url_hash', '=', urlHash);
+      await _db.delete(TableName.mediaIndex).where('url_hash', '=', urlHash);
     });
   }
 }

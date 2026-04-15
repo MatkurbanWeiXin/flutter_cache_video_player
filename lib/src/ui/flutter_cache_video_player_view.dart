@@ -1,8 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:signals/signals_flutter.dart';
+import 'package:signals_flutter/signals_flutter.dart';
+import '../data/enums/play_state.dart';
 import '../player/flutter_cache_video_player_controller.dart';
-import '../player/flutter_cache_video_player_state.dart';
 
 /// 视频渲染组件，只负责显示视频画面和基本状态（加载/缓冲/错误）。
 /// 控制栏、进度条等由使用者自行实现。
@@ -37,12 +37,12 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ps = controller.state.playState.watch(context);
-    final buffering = controller.state.isBuffering.watch(context);
+    final PlayState state = controller.playState.watch(context);
+    final buffering = controller.isBuffering.watch(context);
 
     // Error
-    if (ps == PlayState.error) {
-      final err = controller.state.errorMessage.watch(context);
+    if (state == PlayState.error) {
+      final err = controller.errorMessage.watch(context);
       return Container(
         color: backgroundColor,
         alignment: Alignment.center,
@@ -52,9 +52,8 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
 
     // Web: keep HtmlElementView mounted to avoid DOM unmount/remount issues
     if (kIsWeb) {
-      return Container(
+      return ColoredBox(
         color: backgroundColor,
-        alignment: Alignment.center,
         child: Stack(
           alignment: Alignment.center,
           children: [
@@ -62,7 +61,8 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
               aspectRatio: aspectRatio,
               child: const HtmlElementView(viewType: 'flutter-cache-video-player-web'),
             ),
-            if (ps == PlayState.loading || buffering) _buildLoading(context),
+            if (state == PlayState.loading || buffering)
+              loadingBuilder?.call(context) ?? CircularProgressIndicator(),
           ],
         ),
       );
@@ -70,19 +70,19 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
 
     // Native — loading / buffering
     final textureId = controller.textureId;
-    if (ps == PlayState.loading || buffering) {
+    if (state == PlayState.loading || buffering) {
       return Container(
         color: backgroundColor,
         alignment: Alignment.center,
         child: Stack(
           alignment: Alignment.center,
           children: [
-            if (buffering && ps != PlayState.loading && textureId != null)
+            if (buffering && state != PlayState.loading && textureId != null)
               AspectRatio(
                 aspectRatio: aspectRatio,
                 child: Texture(textureId: textureId),
               ),
-            _buildLoading(context),
+            loadingBuilder?.call(context) ?? CircularProgressIndicator(),
           ],
         ),
       );
@@ -93,7 +93,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
       return Container(
         color: backgroundColor,
         alignment: Alignment.center,
-        child: _buildLoading(context),
+        child: loadingBuilder?.call(context) ?? CircularProgressIndicator(),
       );
     }
 
@@ -106,9 +106,5 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
         child: Texture(textureId: textureId),
       ),
     );
-  }
-
-  Widget _buildLoading(BuildContext context) {
-    return loadingBuilder != null ? loadingBuilder!(context) : const CircularProgressIndicator();
   }
 }
