@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0 (2026-04-15)
+
+
+### Features
+
+* 优化代码结构，修复已知问题 ([5c7831e](https://github.com/MatkurbanWeiXin/flutter_cache_video_player/commit/5c7831ebbff56b1f60bd5e83d1b499a1514b93e9))
+* 优化文档 ([f7ba85c](https://github.com/MatkurbanWeiXin/flutter_cache_video_player/commit/f7ba85c89d736b4806a98c2b323823deee48f426))
+* 删除无用代码 ([4f12f03](https://github.com/MatkurbanWeiXin/flutter_cache_video_player/commit/4f12f031fa01d2170775301ac73147b2c6d97c7e))
+
 ## 1.1.0
 
 - fix windows bugs
