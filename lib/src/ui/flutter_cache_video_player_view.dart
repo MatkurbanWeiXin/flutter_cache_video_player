@@ -87,7 +87,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
               child: const HtmlElementView(viewType: 'flutter-cache-video-player-web'),
             ),
             if (state == PlayState.loading || buffering)
-              loadingBuilder?.call(context) ?? CircularProgressIndicator(),
+              loadingBuilder?.call(context) ?? SizedBox.shrink(),
           ],
         ),
       );
@@ -107,7 +107,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
                 aspectRatio: effectiveAspectRatio,
                 child: Texture(textureId: textureId),
               ),
-            loadingBuilder?.call(context) ?? CircularProgressIndicator(),
+            loadingBuilder?.call(context) ?? SizedBox.shrink(),
           ],
         ),
       );
@@ -118,7 +118,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
       return Container(
         color: backgroundColor,
         alignment: Alignment.center,
-        child: loadingBuilder?.call(context) ?? CircularProgressIndicator(),
+        child: loadingBuilder?.call(context) ?? SizedBox.shrink(),
       );
     }
 

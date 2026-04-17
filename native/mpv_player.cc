@@ -286,6 +286,33 @@ void MpvPlayer::HandleMpvEvent(mpv_event* ev) {
       if (update_handler_) update_handler_();
       break;
     }
+    case MPV_EVENT_FILE_LOADED:
+    case MPV_EVENT_START_FILE:
+    case MPV_EVENT_PLAYBACK_RESTART: {
+      // Property-change observation for `pause` only fires on *changes*.
+      // When a new file starts and pause was already false (our default), no
+      // event is delivered — the Dart side would be stuck in "loading"
+      // forever because playingSignal never flips. Re-query the property on
+      // these lifecycle events and re-emit so the UI state machine advances.
+      if (mpv_ && on_playing_) {
+        int paused = 0;
+        if (mpv_get_property(mpv_, "pause", MPV_FORMAT_FLAG, &paused) >= 0) {
+          on_playing_(paused == 0);
+        }
+      }
+      if (mpv_ && on_buffering_) {
+        // Also clear any stale "buffering" flag once playback starts.
+        int cache_paused = 0;
+        if (mpv_get_property(mpv_, "paused-for-cache", MPV_FORMAT_FLAG,
+                             &cache_paused) >= 0) {
+          on_buffering_(cache_paused != 0);
+        }
+      }
+      // And make sure at least one render has been kicked.
+      render_pending_.store(true, std::memory_order_release);
+      if (update_handler_) update_handler_();
+      break;
+    }
     case MPV_EVENT_PROPERTY_CHANGE: {
       auto* prop = static_cast<mpv_event_property*>(ev->data);
       switch (ev->reply_userdata) {
