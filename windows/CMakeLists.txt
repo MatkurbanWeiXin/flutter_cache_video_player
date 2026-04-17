@@ -51,8 +51,15 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 #   ${MPV_DIR}/include/mpv/*.h
 #   ${MPV_DIR}/libmpv.dll.a      (or mpv.lib)
 #   ${MPV_DIR}/libmpv-2.dll      (runtime, bundled with plugin)
-# You can override via -DMPV_DIR=path when invoking CMake or by setting the
-# MPV_DIR environment variable.
+#
+# If MPV_DIR is not provided (via -DMPV_DIR=... or the MPV_DIR environment
+# variable), the plugin will automatically download and extract a pinned
+# prebuilt libmpv SDK from https://github.com/shinchiro/mpv-winbuild-cmake
+# into `windows/mpv-dev` inside the plugin source tree (cached across builds).
+#
+# You can override the source by setting:
+#   -DMPV_DOWNLOAD_URL=<url to 7z archive>
+#   -DMPV_DOWNLOAD_SHA256=<hex sha256>   (empty string disables the check)
 if(NOT DEFINED MPV_DIR)
   if(DEFINED ENV{MPV_DIR})
     set(MPV_DIR "$ENV{MPV_DIR}")
@@ -62,14 +69,82 @@ if(NOT DEFINED MPV_DIR)
 endif()
 set(MPV_DIR "${MPV_DIR}" CACHE PATH "Path to the libmpv SDK")
 
+# Pinned default prebuilt libmpv SDK (shinchiro/mpv-winbuild-cmake 20260417).
+set(_FCVP_MPV_DEFAULT_URL
+  "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260417/mpv-dev-x86_64-20260417-git-c865008.7z")
+set(_FCVP_MPV_DEFAULT_SHA256
+  "a50490e08b93476191dce06f762bac73f4621d1e47a7b73f4ce7714e3fdb86d0")
+set(MPV_DOWNLOAD_URL "${_FCVP_MPV_DEFAULT_URL}"
+    CACHE STRING "URL of the libmpv dev archive to auto-download when MPV_DIR is missing")
+set(MPV_DOWNLOAD_SHA256 "${_FCVP_MPV_DEFAULT_SHA256}"
+    CACHE STRING "Expected SHA256 of the libmpv dev archive (leave empty to skip verification)")
+
+if(NOT EXISTS "${MPV_DIR}/include/mpv/client.h")
+  if(NOT MPV_DOWNLOAD_URL)
+    message(FATAL_ERROR
+      "libmpv SDK not found at ${MPV_DIR} and MPV_DOWNLOAD_URL is empty. "
+      "Set -DMPV_DIR=<path to mpv-dev SDK> or -DMPV_DOWNLOAD_URL=<archive url>.")
+  endif()
+
+  get_filename_component(_FCVP_ARCHIVE_NAME "${MPV_DOWNLOAD_URL}" NAME)
+  set(_FCVP_ARCHIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${_FCVP_ARCHIVE_NAME}")
+
+  if(NOT EXISTS "${_FCVP_ARCHIVE_PATH}")
+    message(STATUS "libmpv SDK not found at ${MPV_DIR}")
+    message(STATUS "Downloading libmpv SDK from ${MPV_DOWNLOAD_URL}")
+    set(_FCVP_DL_ARGS
+      "${MPV_DOWNLOAD_URL}"
+      "${_FCVP_ARCHIVE_PATH}"
+      SHOW_PROGRESS
+      TLS_VERIFY ON
+      STATUS _FCVP_DL_STATUS)
+    if(MPV_DOWNLOAD_SHA256)
+      list(APPEND _FCVP_DL_ARGS EXPECTED_HASH "SHA256=${MPV_DOWNLOAD_SHA256}")
+    endif()
+    file(DOWNLOAD ${_FCVP_DL_ARGS})
+    list(GET _FCVP_DL_STATUS 0 _FCVP_DL_CODE)
+    if(NOT _FCVP_DL_CODE EQUAL 0)
+      list(GET _FCVP_DL_STATUS 1 _FCVP_DL_MSG)
+      file(REMOVE "${_FCVP_ARCHIVE_PATH}")
+      message(FATAL_ERROR
+        "Failed to download libmpv SDK from ${MPV_DOWNLOAD_URL}: ${_FCVP_DL_MSG}. "
+        "Download it manually and set -DMPV_DIR=<path>.")
+    endif()
+  endif()
+
+  file(MAKE_DIRECTORY "${MPV_DIR}")
+  message(STATUS "Extracting libmpv SDK into ${MPV_DIR}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xf "${_FCVP_ARCHIVE_PATH}"
+    WORKING_DIRECTORY "${MPV_DIR}"
+    RESULT_VARIABLE _FCVP_TAR_RC
+  )
+  if(NOT _FCVP_TAR_RC EQUAL 0)
+    message(FATAL_ERROR
+      "Failed to extract libmpv archive '${_FCVP_ARCHIVE_PATH}' (rc=${_FCVP_TAR_RC}). "
+      "CMake's built-in tar supports 7z via libarchive; if this fails on your "
+      "system, extract the archive manually into ${MPV_DIR}.")
+  endif()
+  # Keep the archive around so re-configuring doesn't re-download.
+endif()
+
+if(NOT EXISTS "${MPV_DIR}/include/mpv/client.h")
+  message(FATAL_ERROR
+    "libmpv headers still not found under ${MPV_DIR}/include/mpv. "
+    "Either the archive layout is unexpected or the extraction failed. "
+    "Point -DMPV_DIR=<path> at a directory containing include/mpv/*.h.")
+endif()
+
 find_library(MPV_LIBRARY
   NAMES mpv libmpv libmpv.dll
   PATHS "${MPV_DIR}" "${MPV_DIR}/lib"
   NO_DEFAULT_PATH
 )
 if(NOT MPV_LIBRARY)
-  message(FATAL_ERROR "libmpv import library not found under ${MPV_DIR}. "
-    "Download the libmpv dev package (e.g. mpv-dev-x86_64) and set -DMPV_DIR=<path>.")
+  message(FATAL_ERROR
+    "libmpv import library (libmpv.dll.a / mpv.lib) not found under ${MPV_DIR}. "
+    "If you manually extracted the archive, make sure libmpv.dll.a or mpv.lib "
+    "lives at the root of MPV_DIR.")
 endif()
 
 find_file(MPV_RUNTIME_DLL

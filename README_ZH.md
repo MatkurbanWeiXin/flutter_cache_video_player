@@ -156,18 +156,30 @@ sudo pacman -S mpv
 
 #### Windows
 
-Windows 端基于 libmpv 软件渲染实现。请从 mpv 官网下载预编译的 libmpv SDK
-（例如 [releases 页面](https://mpv.io/installation/) 提供的
-`mpv-dev-x86_64-*.7z`），解压到类似 `C:\libs\mpv-dev` 的目录，里面应包含
-`include/mpv/*.h`、`libmpv.dll.a`（或 `mpv.lib`）以及运行时 `libmpv-2.dll`。
+Windows 端基于 libmpv 软件渲染实现。**无需手动安装任何东西** —— 第一次
+执行 `flutter run windows` / `flutter build windows` 时，插件会自动从
+[shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake)
+下载一个已钉版的预编译 libmpv SDK，解压到插件下的
+`windows/mpv-dev/` 并缓存复用；下载文件会按钉住的 SHA-256 校验。
+`libmpv-2.dll` 会自动随 Flutter 产物一同拷贝到输出目录。
 
-构建时通过 CMake 变量指向该目录：
+如需使用本机已有的 SDK（例如离线环境或其它架构），请通过以下方式指向：
 
 ```bash
+# 推荐：目录需包含 include/mpv/*.h、libmpv.dll.a、libmpv-2.dll
 cmake -DMPV_DIR=C:/libs/mpv-dev ...
+# 或使用环境变量
+set MPV_DIR=C:\libs\mpv-dev
 ```
 
-`libmpv-2.dll` 会自动随 Flutter 产物一同拷贝到输出目录。
+如需切换到其它归档：
+
+```bash
+cmake -DMPV_DOWNLOAD_URL=https://example.com/mpv-dev.7z ^
+      -DMPV_DOWNLOAD_SHA256=<sha256> ...
+```
+
+解压使用的是 CMake 自带的 `cmake -E tar`（libarchive），原生支持 7z。
 
 ## 配置参考
 

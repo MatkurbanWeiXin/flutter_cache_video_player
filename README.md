@@ -155,21 +155,33 @@ sudo pacman -S mpv
 
 #### Windows
 
-The Windows backend uses libmpv through software rendering. Download a
-prebuilt libmpv SDK (for example the `mpv-dev-x86_64-*.7z` from the mpv
-[releases page](https://mpv.io/installation/)) and extract it somewhere like
-`C:\libs\mpv-dev`. The directory must contain `include/mpv/*.h`, a `libmpv.dll.a`
-(or `mpv.lib`) import library, and the runtime `libmpv-2.dll`.
+The Windows backend uses libmpv through software rendering. **You don't need
+to install anything manually** — the first `flutter run windows` /
+`flutter build windows` will auto-download a pinned prebuilt libmpv SDK
+(from [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake))
+into `windows/mpv-dev/` inside the plugin and cache it there. The archive is
+verified against a pinned SHA-256. `libmpv-2.dll` is bundled into the Flutter
+build output automatically.
 
-Pass the path when building:
+If you want to use a pre-extracted SDK (e.g. on offline machines or a
+different architecture), point CMake at it via one of:
 
 ```bash
-flutter build windows --dart-define=MPV_DIR=C:\libs\mpv-dev
-# or via CMake directly
+# Preferred: directory containing include/mpv/*.h, libmpv.dll.a, libmpv-2.dll
 cmake -DMPV_DIR=C:/libs/mpv-dev ...
+# Or via environment variable
+set MPV_DIR=C:\libs\mpv-dev
 ```
 
-`libmpv-2.dll` is bundled into the Flutter build output automatically.
+To pin a different archive:
+
+```bash
+cmake -DMPV_DOWNLOAD_URL=https://example.com/mpv-dev.7z \
+      -DMPV_DOWNLOAD_SHA256=<sha256> ...
+```
+
+Extraction uses CMake's built-in `cmake -E tar` (libarchive), which supports
+7z out of the box.
 
 ## Configuration Reference
 
