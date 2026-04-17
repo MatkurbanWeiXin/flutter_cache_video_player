@@ -115,6 +115,13 @@ class MpvPlayer {
 
   std::atomic<int64_t> video_w_{0};
   std::atomic<int64_t> video_h_{0};
+  // Raw source dimensions (`width`/`height`). These populate from the
+  // demuxer as soon as the stream header is read — much earlier than
+  // `dwidth`/`dheight` (which on Windows libmpv SW rendering only fill in
+  // *after* the first mpv_render_context_render call). Used as a fallback so
+  // that we can kick off rendering and break the chicken-and-egg deadlock.
+  std::atomic<int64_t> src_w_{0};
+  std::atomic<int64_t> src_h_{0};
 
   std::atomic<bool> render_pending_{false};
 

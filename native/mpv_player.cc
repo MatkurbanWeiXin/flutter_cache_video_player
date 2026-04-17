@@ -37,6 +37,10 @@ constexpr uint64_t kPropCache = 5;
 constexpr uint64_t kPropEof = 6;
 constexpr uint64_t kPropVideoWidth = 7;
 constexpr uint64_t kPropVideoHeight = 8;
+// Raw source dimensions — available earlier than dwidth/dheight under SW
+// rendering on some platforms (notably Windows).
+constexpr uint64_t kPropSrcWidth = 9;
+constexpr uint64_t kPropSrcHeight = 10;
 
 std::string TempFilePath(const char* suffix) {
 #if defined(_WIN32)
@@ -191,6 +195,8 @@ bool MpvPlayer::Initialize(std::string* error) {
   mpv_observe_property(mpv_, kPropEof, "eof-reached", MPV_FORMAT_FLAG);
   mpv_observe_property(mpv_, kPropVideoWidth, "dwidth", MPV_FORMAT_INT64);
   mpv_observe_property(mpv_, kPropVideoHeight, "dheight", MPV_FORMAT_INT64);
+  mpv_observe_property(mpv_, kPropSrcWidth, "width", MPV_FORMAT_INT64);
+  mpv_observe_property(mpv_, kPropSrcHeight, "height", MPV_FORMAT_INT64);
   return true;
 }
 
@@ -266,6 +272,14 @@ void MpvPlayer::HandleMpvEvent(mpv_event* ev) {
     }
     case MPV_EVENT_LOG_MESSAGE:
       break;
+    case MPV_EVENT_VIDEO_RECONFIG: {
+      // Kick a render after any video reconfig (size change, new stream, etc.)
+      // so Windows SW rendering can break out of the
+      // dwidth-is-0-until-first-render chicken-and-egg.
+      render_pending_.store(true, std::memory_order_release);
+      if (update_handler_) update_handler_();
+      break;
+    }
     case MPV_EVENT_PROPERTY_CHANGE: {
       auto* prop = static_cast<mpv_event_property*>(ev->data);
       switch (ev->reply_userdata) {
@@ -315,6 +329,39 @@ void MpvPlayer::HandleMpvEvent(mpv_event* ev) {
             }
           }
           break;
+        case kPropSrcWidth:
+          if (prop->format == MPV_FORMAT_INT64 && prop->data) {
+            src_w_.store(*static_cast<int64_t*>(prop->data));
+            // Emit a videoSize event using the best dimensions we have so that
+            // the Flutter side can render the texture immediately even before
+            // dwidth/dheight settle (see kPropSrcWidth comment).
+            if (on_video_size_) {
+              int64_t w = video_w_.load();
+              int64_t h = video_h_.load();
+              if (w <= 0) w = src_w_.load();
+              if (h <= 0) h = src_h_.load();
+              if (w > 0 && h > 0) on_video_size_(w, h);
+            }
+            // Nudge the render loop: with a now-known size, we can perform
+            // the first SW render even if dwidth/dheight haven't fired yet.
+            render_pending_.store(true, std::memory_order_release);
+            if (update_handler_) update_handler_();
+          }
+          break;
+        case kPropSrcHeight:
+          if (prop->format == MPV_FORMAT_INT64 && prop->data) {
+            src_h_.store(*static_cast<int64_t*>(prop->data));
+            if (on_video_size_) {
+              int64_t w = video_w_.load();
+              int64_t h = video_h_.load();
+              if (w <= 0) w = src_w_.load();
+              if (h <= 0) h = src_h_.load();
+              if (w > 0 && h > 0) on_video_size_(w, h);
+            }
+            render_pending_.store(true, std::memory_order_release);
+            if (update_handler_) update_handler_();
+          }
+          break;
         case kPropEof:
           break;
       }
@@ -331,10 +378,19 @@ bool MpvPlayer::Render() {
   if (!render_ctx_) return false;
   if (!render_pending_.exchange(false, std::memory_order_acq_rel)) return false;
 
+  // Prefer display dimensions (aspect-corrected), but fall back to raw source
+  // dimensions if the VO hasn't populated dwidth/dheight yet. This is crucial
+  // on Windows with SW rendering where dwidth/dheight only settle after the
+  // first successful render.
   int64_t w = video_w_.load();
   int64_t h = video_h_.load();
   if (w <= 0 || h <= 0) {
-    // No video info yet — skip, we'll get another update later.
+    w = src_w_.load();
+    h = src_h_.load();
+  }
+  if (w <= 0 || h <= 0) {
+    // Still no video info — we'll get another update when the demuxer finishes
+    // reading the stream header.
     return false;
   }
   return PerformRender(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
