@@ -43,9 +43,16 @@ target_compile_options(${PLUGIN_NAME} PRIVATE /utf-8)
 # Symbols are hidden by default to reduce the chance of accidental conflicts
 # between plugins. This should not be removed; any symbols that should be
 # exported should be explicitly exported with the FLUTTER_PLUGIN_EXPORT macro.
+# Symbols are hidden by default to reduce the chance of accidental conflicts
+# between plugins. This should not be removed; any symbols that should be
+# exported should be explicitly exported with the FLUTTER_PLUGIN_EXPORT macro.
 set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
-target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
+target_compile_definitions(${PLUGIN_NAME} PRIVATE
+  FLUTTER_PLUGIN_IMPL
+  NOMINMAX
+  WIN32_LEAN_AND_MEAN
+)
 
 # libmpv SDK location. Expected layout:
 #   ${MPV_DIR}/include/mpv/*.h
@@ -214,6 +221,7 @@ add_executable(${TEST_RUNNER}
 )
 apply_standard_settings(${TEST_RUNNER})
 target_compile_options(${TEST_RUNNER} PRIVATE /utf-8)
+target_compile_definitions(${TEST_RUNNER} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_include_directories(${TEST_RUNNER} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../native"

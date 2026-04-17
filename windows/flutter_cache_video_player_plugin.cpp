@@ -1,5 +1,12 @@
 #include "flutter_cache_video_player_plugin.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <flutter/event_stream_handler_functions.h>
 #include <flutter/standard_method_codec.h>
 #include <shlobj.h>
@@ -274,8 +281,24 @@ void FlutterCacheVideoPlayerPlugin::HandleMethodCall(
     return;
   }
   if (name == "getPlatformVersion") {
+    // Use RtlGetVersion (ntdll) to get the real OS build; GetVersion /
+    // GetVersionEx are deprecated and lie on Windows 8.1+ without a manifest.
     std::ostringstream os;
-    os << "Windows " << GetVersion();
+    os << "Windows";
+    using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+    HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+    if (ntdll != nullptr) {
+      auto fn = reinterpret_cast<RtlGetVersionFn>(
+          ::GetProcAddress(ntdll, "RtlGetVersion"));
+      if (fn != nullptr) {
+        RTL_OSVERSIONINFOW info{};
+        info.dwOSVersionInfoSize = sizeof(info);
+        if (fn(&info) == 0 /* STATUS_SUCCESS */) {
+          os << " " << info.dwMajorVersion << "." << info.dwMinorVersion
+             << "." << info.dwBuildNumber;
+        }
+      }
+    }
     result->Success(flutter::EncodableValue(os.str()));
     return;
   }

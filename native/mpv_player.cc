@@ -10,6 +10,12 @@
 #include <thread>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX  // prevent windows.h from defining min/max macros.
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <io.h>
 #include <windows.h>
 #define mpv_unlink _unlink
