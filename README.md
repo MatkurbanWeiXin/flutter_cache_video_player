@@ -175,6 +175,142 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
    missing, it waits for the download to complete
 5. **Play** — The native player (ExoPlayer/AVPlayer/GStreamer/MF/HTML5) renders frames via Flutter Texture
 
+## Widgets
+
+The plugin ships with two composable widgets. Pair either of them with a
+`FlutterCacheVideoPlayerController` that you create, `initialize()` once, and
+`dispose()` when done.
+
+### `FlutterCacheVideoPlayerView` — bare video surface
+
+Renders only the native video frame (via `Texture` on native platforms and
+`HtmlElementView` on web) plus a minimal loading / buffering / error state.
+Controls, progress bars, gestures and overlays are 100% your responsibility —
+use this when you want a fully custom UI.
+
+```dart
+final controller = FlutterCacheVideoPlayerController();
+
+@override
+void initState() {
+  super.initState();
+  () async {
+    await controller.initialize();
+    await controller.open('https://example.com/video.mp4');
+    await controller.play();
+  }();
+}
+
+@override
+Widget build(BuildContext context) {
+  return FlutterCacheVideoPlayerView(
+    controller: controller,
+    aspectRatio: 16 / 9,
+    backgroundColor: Colors.black,
+    // Optional custom states.
+    loadingBuilder: (ctx) => const CircularProgressIndicator(),
+    errorBuilder: (ctx, msg) => Text(msg ?? 'Playback error'),
+  );
+}
+
+@override
+void dispose() {
+  controller.dispose();
+  super.dispose();
+}
+```
+
+**Notes**
+
+- The view only reacts to `controller.playState`, `isBuffering`, `errorMessage`
+  and `textureId`. It will not show a play/pause button or scrubber — compose
+  your own, or use `DefaultVideoPlayer` below.
+- On the web the underlying `<video>` element is kept mounted even during
+  loading to avoid DOM remount glitches.
+- `aspectRatio` is applied to the video frame. To fill an arbitrary box, wrap
+  the view in `SizedBox.expand` / `Positioned.fill` yourself — the widget does
+  not stretch to fill by default.
+- When `playState` is `PlayState.error` the frame is hidden entirely; render
+  a retry affordance inside `errorBuilder` so users can recover.
+
+### `DefaultVideoPlayer` — polished drop-in UI
+
+An iOS-style, ready-to-use player built on top of `FlutterCacheVideoPlayerView`.
+It renders the video frame plus an overlay with a top bar (close + more),
+centered transport controls (±skip + play/pause), a thin bottom scrubber with
+**played / buffered / unplayed** segments and monospaced time labels. Tapping
+the frame fades the overlay in/out; it auto-hides during playback.
+
+Cached progress is supplied **by the plugin itself** (driven by the download
+bitmap in the cache repository) — you do not need to feed it manually.
+
+```dart
+final controller = FlutterCacheVideoPlayerController();
+
+@override
+void initState() {
+  super.initState();
+  () async {
+    await controller.initialize();
+    await controller.open('https://example.com/video.mp4');
+    await controller.play();
+  }();
+}
+
+@override
+Widget build(BuildContext context) {
+  return DefaultVideoPlayer(
+    controller: controller,
+    aspectRatio: 16 / 9,
+    skipDuration: const Duration(seconds: 10),
+    autoHideDelay: const Duration(seconds: 3),
+    // Optional: customise look & feel.
+    style: const DefaultVideoPlayerStyle(
+      scrimIntensity: 0.55,
+      enableGlassmorphism: false,
+    ),
+    onClose: () => Navigator.of(context).maybePop(),
+    onMore: _showMoreSheet,
+  );
+}
+```
+
+**Key parameters**
+
+| Parameter          | Default                   | Description                                                                                               |
+|--------------------|---------------------------|-----------------------------------------------------------------------------------------------------------|
+| `controller`       | —                         | Required `FlutterCacheVideoPlayerController`. Must be `initialize()`-d before playback starts.            |
+| `aspectRatio`      | `16 / 9`                  | Used when `fill` is `false`.                                                                              |
+| `fill`             | `false`                   | When `true` the player fills the parent constraints instead of respecting `aspectRatio` (use for fullscreen). |
+| `skipDuration`     | `Duration(seconds: 10)`   | Controls the ±skip buttons. Matching SF Symbols are auto-picked for 10/15/30/45/60/75/90 s.              |
+| `autoHideDelay`    | `Duration(seconds: 3)`    | Time before the overlay fades while playing. `Duration.zero` disables auto-hide.                          |
+| `fadeDuration`     | `240 ms`                  | Overlay fade animation.                                                                                   |
+| `bufferedProgress` | `null`                    | Optional override; by default the plugin's `controller.bufferedProgress` drives the buffered segment.     |
+| `style`            | `DefaultVideoPlayerStyle()` | Colors, sizes, paddings, scrim, glass, scrubber colors/heights, time label text style.                  |
+| `onClose` / `onMore` | `null` / `null`         | Top-bar callbacks. `onClose` falls back to `Navigator.maybePop`.                                          |
+| `topBarActions`    | `[]`                      | Extra actions injected before the "more" button (PiP, cast, etc.).                                        |
+| `errorBuilder` / `loadingBuilder` | `null`     | Forwarded to the underlying `FlutterCacheVideoPlayerView`.                                                |
+| `topBarBuilder` / `centerControlsBuilder` / `bottomScrubberBuilder` | `null` | Fully replace any slot with your own widget while still receiving a `DefaultVideoPlayerSlotContext`. |
+| `extraOverlayBuilder` | `null`                 | Adds an extra layer above the controls (subtitles, danmu, watermark, …).                                  |
+
+**Notes**
+
+- Icons are Cupertino SF Symbols. `skipDuration` must be one of 10 / 15 / 30 /
+  45 / 60 / 75 / 90 s to get a matching glyph; other values fall back to the
+  10 s glyph.
+- Time labels use `FontFeature.tabularFigures()` to avoid horizontal jitter
+  during playback.
+- The buffered segment is **always** read from `controller.bufferedProgress`
+  unless you pass an explicit `bufferedProgress` listenable — do not try to
+  "push" cache progress into the widget, the plugin owns it.
+- Auto-hide is wired to `controller.isPlaying`: the overlay stays pinned
+  whenever playback is paused, loading, buffering or errored.
+- When the user seeks to the end and the media completes, the stored playback
+  history for that URL is reset — reopening the same URL starts from `0`.
+- For landscape/fullscreen, wrap the widget in your own route and set `fill:
+  true`; combine with `SystemChrome.setPreferredOrientations` /
+  `SystemChrome.setEnabledSystemUIMode` as needed.
+
 ## Example
 
 See the [example](example/) directory for a complete app demonstrating:

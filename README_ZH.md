@@ -173,6 +173,137 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 4. **服务** — 代理服务器从磁盘读取已缓存的块并流式传输给原生播放器；如果某块缺失，会等待下载完成
 5. **播放** — 原生播放器（ExoPlayer/AVPlayer/GStreamer/MF/HTML5）通过 Flutter Texture 渲染画面
 
+## 组件 Widgets
+
+插件内置两个可组合的组件。使用任意一个时，都需要你自行创建一个
+`FlutterCacheVideoPlayerController`，并调用一次 `initialize()`，不再使用时
+调用 `dispose()`。
+
+### `FlutterCacheVideoPlayerView` — 纯视频画面
+
+只负责渲染原生视频帧（原生平台通过 `Texture`，Web 通过 `HtmlElementView`），
+并展示最基本的加载/缓冲/错误状态。控件、进度条、手势、浮层等全部由你自己实现 ——
+当你需要完全自定义 UI 时使用它。
+
+```dart
+final controller = FlutterCacheVideoPlayerController();
+
+@override
+void initState() {
+  super.initState();
+  () async {
+    await controller.initialize();
+    await controller.open('https://example.com/video.mp4');
+    await controller.play();
+  }();
+}
+
+@override
+Widget build(BuildContext context) {
+  return FlutterCacheVideoPlayerView(
+    controller: controller,
+    aspectRatio: 16 / 9,
+    backgroundColor: Colors.black,
+    // 可选的自定义状态视图
+    loadingBuilder: (ctx) => const CircularProgressIndicator(),
+    errorBuilder: (ctx, msg) => Text(msg ?? '播放错误'),
+  );
+}
+
+@override
+void dispose() {
+  controller.dispose();
+  super.dispose();
+}
+```
+
+**注意事项**
+
+- 该组件仅响应 `controller.playState`、`isBuffering`、`errorMessage`、
+  `textureId` 四个信号，不会显示播放/暂停按钮或进度条 —— 请自己实现，或
+  改用下方的 `DefaultVideoPlayer`。
+- 在 Web 上，底层 `<video>` 元素在加载期间也会保持挂载，避免 DOM 卸载/重
+  挂载引起的闪烁。
+- `aspectRatio` 只作用于视频帧本身。需要填满任意容器时，请在外层包
+  `SizedBox.expand` / `Positioned.fill`，组件默认不会自动拉伸。
+- 当 `playState == PlayState.error` 时视频帧会被隐藏，请在 `errorBuilder`
+  里提供"重试"入口以便恢复播放。
+
+### `DefaultVideoPlayer` — 高性能默认播放器
+
+基于 `FlutterCacheVideoPlayerView` 之上构建的 iOS 风格开箱即用播放器。包含
+顶部栏（关闭 + 更多）、中央控制区（±快进/快退 + 播放/暂停）、底部进度条
+（**已播放 / 已缓存 / 未播放** 三段 + 等宽数字时间标签），点击画面可平滑
+切换控件显隐，播放中自动隐藏。
+
+**已缓存的进度由插件自身提供**（由缓存仓库中的下载位图驱动），你无需手动
+传入。
+
+```dart
+final controller = FlutterCacheVideoPlayerController();
+
+@override
+void initState() {
+  super.initState();
+  () async {
+    await controller.initialize();
+    await controller.open('https://example.com/video.mp4');
+    await controller.play();
+  }();
+}
+
+@override
+Widget build(BuildContext context) {
+  return DefaultVideoPlayer(
+    controller: controller,
+    aspectRatio: 16 / 9,
+    skipDuration: const Duration(seconds: 10),
+    autoHideDelay: const Duration(seconds: 3),
+    // 可选：自定义外观
+    style: const DefaultVideoPlayerStyle(
+      scrimIntensity: 0.55,
+      enableGlassmorphism: false,
+    ),
+    onClose: () => Navigator.of(context).maybePop(),
+    onMore: _showMoreSheet,
+  );
+}
+```
+
+**关键参数**
+
+| 参数                 | 默认值                     | 说明                                                                                            |
+|--------------------|-------------------------|-----------------------------------------------------------------------------------------------|
+| `controller`       | —                       | 必填 `FlutterCacheVideoPlayerController`，使用前需 `initialize()`。                                   |
+| `aspectRatio`      | `16 / 9`                | 当 `fill` 为 `false` 时生效。                                                                       |
+| `fill`             | `false`                 | 为 `true` 时铺满父约束，忽略 `aspectRatio`（常用于全屏）。                                                      |
+| `skipDuration`     | `Duration(seconds: 10)` | ±快进/快退时长，自动匹配 10/15/30/45/60/75/90 秒对应的 SF 图标。                                                |
+| `autoHideDelay`    | `Duration(seconds: 3)`  | 播放时隐藏控件的延迟。设为 `Duration.zero` 可关闭自动隐藏。                                                        |
+| `fadeDuration`     | `240 ms`                | 控件淡入/淡出时长。                                                                                    |
+| `bufferedProgress` | `null`                  | 可选覆盖；不传时进度条自动使用 `controller.bufferedProgress`。                                                 |
+| `style`            | `DefaultVideoPlayerStyle()` | 颜色、尺寸、内边距、遮罩强度、毛玻璃、进度条颜色/高度、时间文字样式。                                                          |
+| `onClose` / `onMore` | `null` / `null`       | 顶部栏回调。`onClose` 默认回退到 `Navigator.maybePop`。                                                    |
+| `topBarActions`    | `[]`                    | 在"更多"按钮之前插入的额外 action（画中画、投屏等）。                                                              |
+| `errorBuilder` / `loadingBuilder` | `null`   | 透传给底层 `FlutterCacheVideoPlayerView`。                                                           |
+| `topBarBuilder` / `centerControlsBuilder` / `bottomScrubberBuilder` | `null` | 用你自己的组件替换整个槽位，同时仍可拿到 `DefaultVideoPlayerSlotContext`。 |
+| `extraOverlayBuilder` | `null`               | 在控件之上再叠加的自定义图层（字幕、弹幕、水印等）。                                                                    |
+
+**注意事项**
+
+- 图标使用 Cupertino SF Symbols。`skipDuration` 必须是 10 / 15 / 30 / 45 /
+  60 / 75 / 90 秒之一才有对应图标，其他数值回退到 10 秒图标。
+- 时间文字使用 `FontFeature.tabularFigures()` 保证等宽数字，避免播放时时间
+  文字抖动。
+- 已缓存进度**始终**来自 `controller.bufferedProgress`（除非显式传入
+  `bufferedProgress`），请勿尝试从外部"推送"缓存进度，这由插件负责。
+- 自动隐藏绑定在 `controller.isPlaying` 上：暂停、加载、缓冲或错误状态下，
+  控件始终保持可见。
+- 当用户看完视频时，该 URL 的播放历史会被重置为 `0` —— 下次再打开同一 URL
+  会从头开始，而不是停在结尾。
+- 全屏/横屏：将组件放进自己的全屏路由并设置 `fill: true`，配合
+  `SystemChrome.setPreferredOrientations` / `SystemChrome.setEnabledSystemUIMode`
+  使用。
+
 ## 示例
 
 查看 [example](example/) 目录获取完整示例应用，包含：

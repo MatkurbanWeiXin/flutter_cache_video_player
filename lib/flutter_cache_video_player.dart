@@ -30,6 +30,10 @@ export 'src/player/platform_player_factory.dart';
 
 // UI
 export 'src/ui/flutter_cache_video_player_view.dart';
+export 'src/ui/default_video_player.dart';
+export 'src/ui/widgets/player_icon_button.dart';
+export 'src/ui/widgets/player_gradient_mask.dart';
+export 'src/ui/widgets/player_scrubber_slider.dart';
 
 // Utils
 export 'src/utils/url_hasher.dart';

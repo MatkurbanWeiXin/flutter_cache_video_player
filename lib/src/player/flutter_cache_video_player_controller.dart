@@ -36,6 +36,23 @@ class FlutterCacheVideoPlayerController {
 
   final FlutterSignal<String?> mimeType = signal<String?>(null);
 
+  /// 当前媒体的缓存进度（0.0 – 1.0），由插件根据下载位图自动更新。
+  /// Current media cached progress (0.0 – 1.0), auto-updated by the plugin
+  /// from the download bitmap.
+  final FlutterSignal<double> bufferedProgress = signal<double>(0.0);
+
+  /// 当前媒体已缓存字节数。
+  /// Bytes downloaded for the current media.
+  final FlutterSignal<int> downloadedBytes = signal<int>(0);
+
+  /// 当前媒体是否已完整缓存。
+  /// Whether the current media is fully cached.
+  final FlutterSignal<bool> isFullyCached = signal<bool>(false);
+
+  StreamSubscription<List<Map<String, dynamic>>>? _bitmapSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _mediaIndexSubscription;
+  int _currentTotalChunks = 0;
+
   late final FlutterComputed<bool> isVideo = computed(() {
     return mimeType.value?.startsWith('video/') ?? false;
   });
@@ -143,6 +160,9 @@ class FlutterCacheVideoPlayerController {
 
       await _nativeController.open(mediaUrl);
 
+      // Start watching cache progress from the plugin's cache repository.
+      _subscribeCacheProgress(url);
+
       if (resumeHistory) {
         final urlHash = UrlHasher.hash(url);
         try {
@@ -226,11 +246,64 @@ class FlutterCacheVideoPlayerController {
   /// Disposes resources, cancels subscriptions, and releases the player.
   Future<void> dispose() async {
     await _saveCurrentPosition();
+    await _cancelCacheSubscriptions();
     for (final disposer in _disposers) {
       disposer();
     }
     _disposers.clear();
     await _nativeController.dispose();
+  }
+
+  Future<void> _cancelCacheSubscriptions() async {
+    await _bitmapSubscription?.cancel();
+    _bitmapSubscription = null;
+    await _mediaIndexSubscription?.cancel();
+    _mediaIndexSubscription = null;
+    _currentTotalChunks = 0;
+  }
+
+  /// 订阅当前媒体的缓存进度，实时更新 [bufferedProgress] 等 signals。
+  /// Subscribes to the download bitmap for [url] and drives cache signals.
+  Future<void> _subscribeCacheProgress(String url) async {
+    await _cancelCacheSubscriptions();
+    final urlHash = UrlHasher.hash(url);
+    final repo = FlutterCacheVideoPlayer.instance.cacheRepo;
+
+    try {
+      final existing = await repo.findByHash(urlHash);
+      if (existing != null) {
+        _currentTotalChunks = existing.totalChunks;
+        isFullyCached.value = existing.isCompleted;
+        final bitmap = await repo.getBitmap(urlHash);
+        if (bitmap != null) {
+          _applyBitmap(bitmap);
+        }
+      }
+    } catch (_) {}
+
+    _mediaIndexSubscription = repo.watchMediaIndex(urlHash).listen((rows) {
+      if (rows.isEmpty) return;
+      final index = rows.first;
+      final total = (index['total_chunks'] as int?) ?? 0;
+      final completed = (index['is_completed'] as int?) == 1;
+      if (total > 0) _currentTotalChunks = total;
+      isFullyCached.value = completed;
+    }, onError: (_) {});
+
+    _bitmapSubscription = repo.watchBitmap(urlHash).listen((rows) {
+      if (rows.isEmpty) return;
+      try {
+        final bitmap = ChunkBitmap.fromMap(rows.first);
+        _applyBitmap(bitmap);
+      } catch (_) {}
+    }, onError: (_) {});
+  }
+
+  void _applyBitmap(ChunkBitmap bitmap) {
+    downloadedBytes.value = bitmap.downloadedBytes;
+    if (_currentTotalChunks > 0) {
+      bufferedProgress.value = bitmap.getProgress(_currentTotalChunks).clamp(0.0, 1.0);
+    }
   }
 
   /// 重置所有状态为初始值。
@@ -244,6 +317,9 @@ class FlutterCacheVideoPlayerController {
       errorMessage.value = null;
       currentUrl.value = null;
       mimeType.value = null;
+      bufferedProgress.value = 0.0;
+      downloadedBytes.value = 0;
+      isFullyCached.value = false;
     });
   }
 }
