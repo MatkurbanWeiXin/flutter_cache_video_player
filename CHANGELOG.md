@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.2.0...v1.3.0) (2026-04-17)
+
+
+### Features
+
+* * Add `playNetwork` / `playFile` / `playAsset` / `playSource` entries on the   controller for explicit per-source playback; local files and Flutter assets   bypass the caching proxy. * Add `controller.takeSnapshot()` returning the current frame as a PNG   `XFile` (iOS, Android, macOS, Web). * Add `FlutterCacheVideoPlayer.extractCoverCandidates(source, {count, ...})`   that samples non-black candidate frames from a `VideoSource`, sorted by   brightness descending (iOS, Android, macOS, Web). * Export new public types: `VideoSource`, `VideoCoverFrame`, `XFile`. * Windows/Linux: `takeSnapshot` returns `NOT_IMPLEMENTED` and   `extractCoverCandidates` returns an empty list for now. ([ce63579](https://github.com/Matkurban/flutter_cache_video_player/commit/ce63579e1eb3c685d6fffadfaceeb770d40344cb))
+
 ## [1.2.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.1.0...v1.2.0) (2026-04-17)
 
 
