@@ -1,6 +1,8 @@
 import 'dart:async';
-import 'dart:ui';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_cache_video_player/flutter_cache_video_player.dart';
 import 'package:signals_flutter/signals_flutter.dart';
 import 'native_player_controller.dart';
@@ -48,6 +50,19 @@ class FlutterCacheVideoPlayerController {
   /// 当前媒体是否已完整缓存。
   /// Whether the current media is fully cached.
   final FlutterSignal<bool> isFullyCached = signal<bool>(false);
+
+  /// 视频原始分辨率（已考虑显示方向）。未知时为 `Size.zero`。
+  /// Natural video size reported by the native player. `Size.zero` when
+  /// the size is not yet known.
+  final FlutterSignal<Size> videoSize = signal<Size>(Size.zero);
+
+  /// 视频宽高比（width / height）。未知时返回 `null`。
+  /// Video aspect ratio (width / height). Returns `null` until known.
+  late final FlutterComputed<double?> videoAspectRatio = computed(() {
+    final size = videoSize.value;
+    if (size.width <= 0 || size.height <= 0) return null;
+    return size.width / size.height;
+  });
 
   StreamSubscription<List<Map<String, dynamic>>>? _bitmapSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _mediaIndexSubscription;
@@ -126,6 +141,10 @@ class FlutterCacheVideoPlayerController {
       }
       playState.value = PlayState.stopped;
     });
+    VoidCallback videoSizeEffect = effect(() {
+      final size = _nativeController.videoSizeSignal.value;
+      videoSize.value = size;
+    });
     _disposers.addAll([
       playingEffect,
       positionEffect,
@@ -133,6 +152,7 @@ class FlutterCacheVideoPlayerController {
       bufferingEffect,
       errorEffect,
       completedEffect,
+      videoSizeEffect,
     ]);
   }
 
@@ -141,30 +161,69 @@ class FlutterCacheVideoPlayerController {
     return 0;
   }
 
-  /// 打开指定 URL 的媒体。[resumeHistory] 为 true 时恢复上次播放位置，默认从头播放。
-  /// Opens the media at the given URL. When [resumeHistory] is true, resumes the last position; otherwise starts from the beginning.
-  Future<void> open(String url, {bool resumeHistory = false}) async {
+  /// 播放一个网络地址（`http(s)://...`），走插件的缓存代理。
+  /// Play a network URL (`http(s)://...`) routed through the caching proxy.
+  Future<void> playNetwork(String url, {bool resumeHistory = false}) {
+    return _openSource(VideoSource.network(url), resumeHistory: resumeHistory);
+  }
+
+  /// 播放本地文件（绝对路径或 `file://` URI）。不走代理。
+  /// Play a local file (absolute path or `file://` URI). Bypasses the proxy.
+  Future<void> playFile(String path, {bool resumeHistory = false}) {
+    return _openSource(VideoSource.file(path), resumeHistory: resumeHistory);
+  }
+
+  /// 播放 Flutter assets 中的媒体；首次调用会抽取到临时目录。不走代理。
+  /// Play a media bundled as a Flutter asset; first use extracts it to temp.
+  Future<void> playAsset(String assetPath, {AssetBundle? bundle, bool resumeHistory = false}) {
+    return _openSource(VideoSource.asset(assetPath, bundle: bundle), resumeHistory: resumeHistory);
+  }
+
+  /// 使用 [VideoSource] 直接打开。
+  /// Open the given [VideoSource] directly.
+  Future<void> playSource(VideoSource source, {bool resumeHistory = false}) {
+    return _openSource(source, resumeHistory: resumeHistory);
+  }
+
+  Future<void> _openSource(VideoSource source, {required bool resumeHistory}) async {
     try {
       await _saveCurrentPosition();
 
       _hasPlayedSinceOpen = false;
       reset();
-      currentUrl.value = url;
 
-      final type = MimeDetector.detect(url);
+      final identity = source.identity;
+      currentUrl.value = identity;
+
+      final type = MimeDetector.detect(identity);
       mimeType.value = type;
 
       playState.value = PlayState.loading;
 
-      final mediaUrl = await FlutterCacheVideoPlayer.instance.playerFactory.createMediaUrl(url);
+      final resolved = await source.resolveToNativeUrl();
+      final mediaUrl = await FlutterCacheVideoPlayer.instance.playerFactory.createMediaUrl(
+        source,
+        resolved,
+      );
 
       await _nativeController.open(mediaUrl);
 
-      // Start watching cache progress from the plugin's cache repository.
-      _subscribeCacheProgress(url);
+      if (source.isNetwork) {
+        // Start watching cache progress from the plugin's cache repository.
+        _subscribeCacheProgress(identity);
+      } else {
+        // Local sources are "fully cached" by definition. Skip cache
+        // subscriptions entirely.
+        await _cancelCacheSubscriptions();
+        batch(() {
+          isFullyCached.value = true;
+          bufferedProgress.value = 1.0;
+          downloadedBytes.value = _safeFileSize(resolved);
+        });
+      }
 
       if (resumeHistory) {
-        final urlHash = UrlHasher.hash(url);
+        final urlHash = UrlHasher.hash(identity);
         try {
           final history = await FlutterCacheVideoPlayer.instance.historyRepo.getLastPosition(
             urlHash,
@@ -177,6 +236,19 @@ class FlutterCacheVideoPlayerController {
     } catch (e) {
       errorMessage.value = e.toString();
       playState.value = PlayState.error;
+    }
+  }
+
+  int _safeFileSize(String resolvedUrl) {
+    if (kIsWeb) return 0;
+    try {
+      final uri = Uri.parse(resolvedUrl);
+      if (uri.scheme != 'file') return 0;
+      final file = File(uri.toFilePath());
+      if (!file.existsSync()) return 0;
+      return file.lengthSync();
+    } catch (_) {
+      return 0;
     }
   }
 
@@ -228,6 +300,21 @@ class FlutterCacheVideoPlayerController {
     await _saveCurrentPosition();
     await _nativeController.pause();
     playState.value = PlayState.stopped;
+  }
+
+  /// 对当前画面截图，返回一个 PNG 文件（[XFile]）。
+  ///
+  /// * [savePath] 可选，指定输出文件路径；不传则写入应用临时目录。Web 上忽略此参数。
+  /// * 未加载媒体时抛出 [StateError]。
+  ///
+  /// Take a snapshot of the currently rendered frame and return it as a PNG
+  /// [XFile]. On native platforms [XFile.path] is an absolute file path; on
+  /// web it is a `blob:` URL. Throws [StateError] if no media is loaded.
+  Future<XFile> takeSnapshot({String? savePath}) async {
+    if (currentUrl.value == null) {
+      throw StateError('No media is currently loaded.');
+    }
+    return _nativeController.takeSnapshot(savePath: savePath);
   }
 
   Future<void> _saveCurrentPosition() async {
@@ -320,6 +407,7 @@ class FlutterCacheVideoPlayerController {
       bufferedProgress.value = 0.0;
       downloadedBytes.value = 0;
       isFullyCached.value = false;
+      videoSize.value = Size.zero;
     });
   }
 }

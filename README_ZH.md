@@ -26,8 +26,8 @@
 | Android | ExoPlayer (Media3)                        |
 | iOS     | AVPlayer                                  |
 | macOS   | AVPlayer                                  |
-| Linux   | GStreamer (playbin3)                      |
-| Windows | Media Foundation (IMFMediaEngine + D3D11) |
+| Linux   | libmpv（软件渲染）                         |
+| Windows | libmpv（软件渲染）                         |
 | Web     | HTML5 `<video>`                           |
 
 ## 架构概览
@@ -58,7 +58,7 @@
 │  └─────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │  原生平台层                                      │
-│  ExoPlayer │ AVPlayer │ GStreamer │ MF │ HTML5   │
+│  ExoPlayer │ AVPlayer │  libmpv  │ libmpv │ HTML5  │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -143,12 +143,31 @@ Android 9+ 默认禁止明文 HTTP 流量。本插件使用本地 HTTP 代理（
 
 #### Linux
 
-安装 GStreamer 开发库：
+安装 libmpv 开发库：
 
 ```bash
-sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+# Debian / Ubuntu
+sudo apt install libmpv-dev
+# Fedora
+sudo dnf install mpv-libs-devel
+# Arch
+sudo pacman -S mpv
 ```
+
+#### Windows
+
+Windows 端基于 libmpv 软件渲染实现。请从 mpv 官网下载预编译的 libmpv SDK
+（例如 [releases 页面](https://mpv.io/installation/) 提供的
+`mpv-dev-x86_64-*.7z`），解压到类似 `C:\libs\mpv-dev` 的目录，里面应包含
+`include/mpv/*.h`、`libmpv.dll.a`（或 `mpv.lib`）以及运行时 `libmpv-2.dll`。
+
+构建时通过 CMake 变量指向该目录：
+
+```bash
+cmake -DMPV_DIR=C:/libs/mpv-dev ...
+```
+
+`libmpv-2.dll` 会自动随 Flutter 产物一同拷贝到输出目录。
 
 ## 配置参考
 
@@ -171,7 +190,7 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 2. **下载** — 下载管理器创建分块队列，按优先级将任务分发到 Isolate 工作线程池
 3. **缓存** — 每个下载完成的块保存为独立文件；Bitmap 追踪哪些块已可用
 4. **服务** — 代理服务器从磁盘读取已缓存的块并流式传输给原生播放器；如果某块缺失，会等待下载完成
-5. **播放** — 原生播放器（ExoPlayer/AVPlayer/GStreamer/MF/HTML5）通过 Flutter Texture 渲染画面
+5. **播放** — 原生播放器（ExoPlayer/AVPlayer/libmpv/HTML5）通过 Flutter Texture 渲染画面
 
 ## 组件 Widgets
 
@@ -303,6 +322,82 @@ Widget build(BuildContext context) {
 - 全屏/横屏：将组件放进自己的全屏路由并设置 `fill: true`，配合
   `SystemChrome.setPreferredOrientations` / `SystemChrome.setEnabledSystemUIMode`
   使用。
+
+## 播放来源（网络 / 本地文件 / 资源）
+
+控制器提供三个显式入口方法，以及一个通用入口。**只有网络来源** 会走缓存代理；
+本地文件和 Flutter 资源会直接交给原生播放器，不走代理也不占用缓存。
+
+```dart
+// 1) 网络视频 —— 走内建 HTTP 代理和分块缓存。
+await controller.playNetwork('https://example.com/video.mp4');
+
+// 2) 本地文件 —— 绝对路径或 file:// URI。不走代理，不缓存。
+await controller.playFile('/absolute/path/to/movie.mp4');
+
+// 3) Flutter 资源 —— 首次调用会把 asset 抽取到临时目录。
+await controller.playAsset('assets/videos/intro.mp4');
+
+// 4) 已持有 VideoSource 时的通用入口。
+await controller.playSource(VideoSource.network('https://...'));
+```
+
+旧版 `controller.open(url)` 仍然保留，等价于 `playNetwork(url)`，便于平滑迁移。
+
+使用 `playAsset` 时需要在应用的 `pubspec.yaml` 中声明资源：
+
+```yaml
+flutter:
+  assets:
+    - assets/videos/intro.mp4
+```
+
+## 截图与封面候选
+
+### `takeSnapshot()` —— 截取当前画面
+
+返回一个 PNG 的 [`XFile`]。原生平台下 `XFile.path` 是磁盘路径；Web 下是
+`blob:` / `data:` URL，可直接喂给 `Image.network`。
+
+```dart
+final XFile png = await controller.takeSnapshot();
+// 原生：File(png.path)
+// Web ：Image.network(png.path)
+```
+
+### `extractCoverCandidates()` —— 选出若干非黑封面帧
+
+跳过视频的首尾各 5%，从中间 90% 的时间轴上均匀采样 `count * 3` 帧，对每帧
+做下采样后按 Rec.601 计算亮度，过滤掉亮度 < `minBrightness` 的帧，最后按亮度
+**降序** 返回前 `count` 帧。
+
+```dart
+final frames = await FlutterCacheVideoPlayer.extractCoverCandidates(
+  VideoSource.network('https://example.com/video.mp4'),
+  count: 5,          // 最多返回 5 个
+  minBrightness: 0.08,
+);
+
+for (final f in frames) {
+  print('${f.position} → ${f.image.path} (亮度=${f.brightness})');
+}
+```
+
+`VideoSource.file(...)` / `VideoSource.asset(...)` 同样支持。
+
+### 平台实现情况
+
+| 平台 | `takeSnapshot` | `extractCoverCandidates` |
+|------|:--------------:|:------------------------:|
+| iOS      | ✅ AVPlayerItemVideoOutput + Core Image | ✅ AVAssetImageGenerator |
+| Android  | ✅ MediaMetadataRetriever | ✅ MediaMetadataRetriever |
+| macOS    | ✅ AVPlayerItemVideoOutput + Core Image | ✅ AVAssetImageGenerator |
+| Web      | ✅ `<canvas>.toDataURL` | ✅ 离屏 `<video>` + `<canvas>`（需 CORS） |
+| Windows  | ✅ libmpv `screenshot-to-file` 返回 PNG 字节 | ✅ 基于 libmpv 的封面提取 |
+| Linux    | ✅ libmpv `screenshot-to-file` 返回 PNG 字节 | ✅ 基于 libmpv 的封面提取 |
+
+Web 端做封面抽取时需要视频源返回允许 `crossOrigin="anonymous"` 的 CORS
+响应头，否则 canvas 会被标记为 tainted，方法会直接返回空列表。
 
 ## 示例
 

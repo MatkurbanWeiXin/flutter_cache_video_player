@@ -14,8 +14,21 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
   /// 播放控制器实例。
   final FlutterCacheVideoPlayerController controller;
 
-  /// 视频宽高比，默认 16:9。
-  final double aspectRatio;
+  /// 视频宽高比。
+  ///
+  /// 默认 `null`，表示使用原生播放器上报的视频实际宽高比，避免竖向视频
+  /// 被强制拉伸到 16:9。上报之前会临时按 16:9 占位。
+  ///
+  /// 若显式传入数值，则始终使用该宽高比（忽略原生上报）。
+  ///
+  /// Video aspect ratio.
+  ///
+  /// `null` (default) lets the view follow the natural aspect ratio reported
+  /// by the native player, so portrait videos are not stretched to 16:9.
+  /// Before the size is known the view falls back to 16:9 as a placeholder.
+  ///
+  /// Pass a concrete value to force a fixed aspect ratio.
+  final double? aspectRatio;
 
   /// 背景色，默认黑色。
   final Color backgroundColor;
@@ -29,7 +42,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
   const FlutterCacheVideoPlayerView({
     super.key,
     required this.controller,
-    this.aspectRatio = 16 / 9,
+    this.aspectRatio,
     this.backgroundColor = Colors.black,
     this.errorBuilder,
     this.loadingBuilder,
@@ -39,6 +52,18 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
   Widget build(BuildContext context) {
     final PlayState state = controller.playState.watch(context);
     final buffering = controller.isBuffering.watch(context);
+
+    // Resolve the aspect ratio to use for this build:
+    //  * explicit `aspectRatio` param always wins
+    //  * otherwise use the native-reported natural video size
+    //  * fall back to 16:9 when nothing is known yet
+    final double effectiveAspectRatio;
+    if (aspectRatio != null) {
+      effectiveAspectRatio = aspectRatio!;
+    } else {
+      final reported = controller.videoAspectRatio.watch(context);
+      effectiveAspectRatio = (reported != null && reported > 0) ? reported : 16 / 9;
+    }
 
     // Error
     if (state == PlayState.error) {
@@ -58,7 +83,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
           alignment: Alignment.center,
           children: [
             AspectRatio(
-              aspectRatio: aspectRatio,
+              aspectRatio: effectiveAspectRatio,
               child: const HtmlElementView(viewType: 'flutter-cache-video-player-web'),
             ),
             if (state == PlayState.loading || buffering)
@@ -79,7 +104,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
           children: [
             if (buffering && state != PlayState.loading && textureId != null)
               AspectRatio(
-                aspectRatio: aspectRatio,
+                aspectRatio: effectiveAspectRatio,
                 child: Texture(textureId: textureId),
               ),
             loadingBuilder?.call(context) ?? CircularProgressIndicator(),
@@ -102,7 +127,7 @@ class FlutterCacheVideoPlayerView extends StatelessWidget {
       color: backgroundColor,
       alignment: Alignment.center,
       child: AspectRatio(
-        aspectRatio: aspectRatio,
+        aspectRatio: effectiveAspectRatio,
         child: Texture(textureId: textureId),
       ),
     );

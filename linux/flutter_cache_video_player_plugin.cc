@@ -1,26 +1,24 @@
-/// Linux 原生视频播放器插件，基于 GStreamer (playbin3) + FlPixelBufferTexture 实现。
-/// Linux native video player plugin using GStreamer (playbin3) + FlPixelBufferTexture.
+// Linux plugin implementation — libmpv + FlPixelBufferTexture (software rendering).
 
 #include "include/flutter_cache_video_player/flutter_cache_video_player_plugin.h"
 
 #include <flutter_linux/flutter_linux.h>
-#include <gst/gst.h>
-#include <gst/video/video.h>
 #include <gtk/gtk.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 
 #include <cstring>
+#include <memory>
+#include <string>
 
 #include "flutter_cache_video_player_plugin_private.h"
+#include "mpv_player.h"
 
-// ══════════════════════════════════════════════════════════════════
-// VideoTexture — FlPixelBufferTexture 子类，存储视频帧像素数据
-// VideoTexture — FlPixelBufferTexture subclass storing video frame pixels
-// ══════════════════════════════════════════════════════════════════
+using flutter_cache_video_player::CoverFrame;
+using flutter_cache_video_player::MpvPlayer;
 
 #define VIDEO_TEXTURE_TYPE (video_texture_get_type())
-G_DECLARE_FINAL_TYPE(VideoTexture, video_texture, VIDEO, TEXTURE,
-                     FlPixelBufferTexture)
+G_DECLARE_FINAL_TYPE(VideoTexture, video_texture, VIDEO, TEXTURE, FlPixelBufferTexture)
 
 struct _VideoTexture {
   FlPixelBufferTexture parent_instance;
@@ -33,17 +31,17 @@ struct _VideoTexture {
 G_DEFINE_TYPE(VideoTexture, video_texture, fl_pixel_buffer_texture_get_type())
 
 static gboolean video_texture_copy_pixels_cb(FlPixelBufferTexture* tex,
-                                              const uint8_t** out_buffer,
-                                              uint32_t* width,
-                                              uint32_t* height,
-                                              GError** error) {
+                                             const uint8_t** out_buffer,
+                                             uint32_t* width, uint32_t* height,
+                                             GError** /*error*/) {
   VideoTexture* self = VIDEO_TEXTURE(tex);
   g_mutex_lock(&self->mutex);
   *out_buffer = self->buffer;
   *width = self->width;
   *height = self->height;
+  gboolean ok = self->buffer != nullptr;
   g_mutex_unlock(&self->mutex);
-  return self->buffer != nullptr;
+  return ok;
 }
 
 static void video_texture_dispose(GObject* obj) {
@@ -58,8 +56,7 @@ static void video_texture_dispose(GObject* obj) {
 
 static void video_texture_class_init(VideoTextureClass* klass) {
   G_OBJECT_CLASS(klass)->dispose = video_texture_dispose;
-  FL_PIXEL_BUFFER_TEXTURE_CLASS(klass)->copy_pixels =
-      video_texture_copy_pixels_cb;
+  FL_PIXEL_BUFFER_TEXTURE_CLASS(klass)->copy_pixels = video_texture_copy_pixels_cb;
 }
 
 static void video_texture_init(VideoTexture* self) {
@@ -73,14 +70,21 @@ static VideoTexture* video_texture_new() {
   return VIDEO_TEXTURE(g_object_new(VIDEO_TEXTURE_TYPE, nullptr));
 }
 
-// ══════════════════════════════════════════════════════════════════
-// Plugin 主结构 / Plugin main struct
-// ══════════════════════════════════════════════════════════════════
+static void video_texture_write(VideoTexture* tex, const uint8_t* src,
+                                uint32_t w, uint32_t h) {
+  g_mutex_lock(&tex->mutex);
+  if (tex->width != w || tex->height != h) {
+    g_free(tex->buffer);
+    tex->buffer = static_cast<uint8_t*>(g_malloc(static_cast<size_t>(w) * h * 4));
+    tex->width = w;
+    tex->height = h;
+  }
+  std::memcpy(tex->buffer, src, static_cast<size_t>(w) * h * 4);
+  g_mutex_unlock(&tex->mutex);
+}
 
-#define FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(obj)                     \
-  (G_TYPE_CHECK_INSTANCE_CAST(                                     \
-      (obj), flutter_cache_video_player_plugin_get_type(),         \
-      FlutterCacheVideoPlayerPlugin))
+#define FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(obj) \
+  (G_TYPE_CHECK_INSTANCE_CAST((obj), flutter_cache_video_player_plugin_get_type(), FlutterCacheVideoPlayerPlugin))
 
 struct _FlutterCacheVideoPlayerPlugin {
   GObject parent_instance;
@@ -89,295 +93,106 @@ struct _FlutterCacheVideoPlayerPlugin {
   FlEventChannel* event_channel;
   VideoTexture* texture;
   int64_t texture_id;
-  GstElement* pipeline;
-  guint position_timer_id;
+  MpvPlayer* player;
+  guint drain_source_id;
+  guint render_source_id;
 };
 
-G_DEFINE_TYPE(FlutterCacheVideoPlayerPlugin,
-              flutter_cache_video_player_plugin, g_object_get_type())
+G_DEFINE_TYPE(FlutterCacheVideoPlayerPlugin, flutter_cache_video_player_plugin, g_object_get_type())
 
-// ── 事件发送 / Event sending ──
-
-typedef struct {
-  FlEventChannel* channel;
-  gchar* name;
-  FlValue* value;
-} EventPayload;
-
-static gboolean send_event_idle_cb(gpointer data) {
-  EventPayload* p = static_cast<EventPayload*>(data);
+static void send_event(FlutterCacheVideoPlayerPlugin* self, const gchar* name, FlValue* value) {
+  if (!self->event_channel) { if (value) fl_value_unref(value); return; }
   g_autoptr(FlValue) map = fl_value_new_map();
-  fl_value_set_string_take(map, "event", fl_value_new_string(p->name));
-  fl_value_set_string(map, "value", p->value);
-  fl_event_channel_send(p->channel, map, nullptr, nullptr);
-  g_free(p->name);
-  fl_value_unref(p->value);
-  g_free(p);
+  fl_value_set_string_take(map, "event", fl_value_new_string(name));
+  fl_value_set_string_take(map, "value", value);
+  fl_event_channel_send(self->event_channel, map, nullptr, nullptr);
+}
+static void send_event_int(FlutterCacheVideoPlayerPlugin* s, const gchar* n, int64_t v) { send_event(s, n, fl_value_new_int(v)); }
+static void send_event_bool(FlutterCacheVideoPlayerPlugin* s, const gchar* n, gboolean v) { send_event(s, n, fl_value_new_bool(v)); }
+static void send_event_null(FlutterCacheVideoPlayerPlugin* s, const gchar* n) { send_event(s, n, fl_value_new_null()); }
+static void send_event_str(FlutterCacheVideoPlayerPlugin* s, const gchar* n, const gchar* v) { send_event(s, n, fl_value_new_string(v)); }
+
+static gboolean drain_events_cb(gpointer user_data) {
+  auto* self = static_cast<FlutterCacheVideoPlayerPlugin*>(user_data);
+  self->drain_source_id = 0;
+  if (self->player) self->player->DrainEvents();
   return G_SOURCE_REMOVE;
 }
 
-static void send_event(FlutterCacheVideoPlayerPlugin* self,
-                        const gchar* name, FlValue* value) {
-  if (!self->event_channel) return;
-  EventPayload* p = g_new(EventPayload, 1);
-  p->channel = self->event_channel;
-  p->name = g_strdup(name);
-  p->value = fl_value_ref(value);
-  g_idle_add(send_event_idle_cb, p);
-}
-
-static void send_event_int(FlutterCacheVideoPlayerPlugin* self,
-                            const gchar* name, int64_t val) {
-  g_autoptr(FlValue) v = fl_value_new_int(val);
-  send_event(self, name, v);
-}
-
-static void send_event_bool(FlutterCacheVideoPlayerPlugin* self,
-                             const gchar* name, gboolean val) {
-  g_autoptr(FlValue) v = fl_value_new_bool(val);
-  send_event(self, name, v);
-}
-
-static void send_event_null(FlutterCacheVideoPlayerPlugin* self,
-                             const gchar* name) {
-  g_autoptr(FlValue) v = fl_value_new_null();
-  send_event(self, name, v);
-}
-
-static void send_event_str(FlutterCacheVideoPlayerPlugin* self,
-                            const gchar* name, const gchar* val) {
-  g_autoptr(FlValue) v = fl_value_new_string(val);
-  send_event(self, name, v);
-}
-
-// ── GStreamer 回调 / GStreamer callbacks ──
-
-static GstFlowReturn on_new_sample(GstElement* sink, gpointer user_data) {
+static gboolean render_cb(gpointer user_data) {
   auto* self = static_cast<FlutterCacheVideoPlayerPlugin*>(user_data);
-
-  GstSample* sample = nullptr;
-  g_signal_emit_by_name(sink, "pull-sample", &sample);
-  if (!sample) return GST_FLOW_ERROR;
-
-  GstBuffer* buffer = gst_sample_get_buffer(sample);
-  GstCaps* caps = gst_sample_get_caps(sample);
-  GstVideoInfo info;
-  gst_video_info_from_caps(&info, caps);
-
-  GstMapInfo map;
-  if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-    gst_sample_unref(sample);
-    return GST_FLOW_ERROR;
+  self->render_source_id = 0;
+  if (self->player && self->player->Render()) {
+    if (self->texture)
+      fl_texture_registrar_mark_texture_frame_available(self->texture_registrar, FL_TEXTURE(self->texture));
   }
-
-  uint32_t w = GST_VIDEO_INFO_WIDTH(&info);
-  uint32_t h = GST_VIDEO_INFO_HEIGHT(&info);
-
-  g_mutex_lock(&self->texture->mutex);
-  if (self->texture->width != w || self->texture->height != h) {
-    g_free(self->texture->buffer);
-    self->texture->buffer =
-        static_cast<uint8_t*>(g_malloc(static_cast<size_t>(w) * h * 4));
-    self->texture->width = w;
-    self->texture->height = h;
-  }
-
-  uint32_t stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
-  if (stride == w * 4) {
-    memcpy(self->texture->buffer, map.data,
-           static_cast<size_t>(w) * h * 4);
-  } else {
-    for (uint32_t row = 0; row < h; row++) {
-      memcpy(self->texture->buffer + row * w * 4,
-             map.data + row * stride, w * 4);
-    }
-  }
-  g_mutex_unlock(&self->texture->mutex);
-
-  gst_buffer_unmap(buffer, &map);
-  gst_sample_unref(sample);
-
-  fl_texture_registrar_mark_texture_frame_available(
-      self->texture_registrar, FL_TEXTURE(self->texture));
-
-  return GST_FLOW_OK;
+  return G_SOURCE_REMOVE;
 }
 
-static gboolean on_bus_message(GstBus* bus, GstMessage* msg,
-                                gpointer user_data) {
-  auto* self = static_cast<FlutterCacheVideoPlayerPlugin*>(user_data);
-
-  switch (GST_MESSAGE_TYPE(msg)) {
-    case GST_MESSAGE_EOS:
-      send_event_null(self, "completed");
-      break;
-    case GST_MESSAGE_ERROR: {
-      GError* error = nullptr;
-      gst_message_parse_error(msg, &error, nullptr);
-      send_event_str(self, "error", error->message);
-      g_error_free(error);
-      break;
-    }
-    case GST_MESSAGE_DURATION_CHANGED: {
-      gint64 dur = 0;
-      if (gst_element_query_duration(self->pipeline, GST_FORMAT_TIME, &dur)) {
-        send_event_int(self, "duration",
-                       static_cast<int64_t>(dur / GST_MSECOND));
-      }
-      break;
-    }
-    case GST_MESSAGE_STATE_CHANGED: {
-      if (GST_MESSAGE_SRC(msg) == GST_OBJECT(self->pipeline)) {
-        GstState old_st, new_st;
-        gst_message_parse_state_changed(msg, &old_st, &new_st, nullptr);
-        if (new_st == GST_STATE_PLAYING) {
-          send_event_bool(self, "playing", TRUE);
-          send_event_bool(self, "buffering", FALSE);
-        } else if (new_st == GST_STATE_PAUSED &&
-                   old_st == GST_STATE_PLAYING) {
-          send_event_bool(self, "playing", FALSE);
-        }
-      }
-      break;
-    }
-    case GST_MESSAGE_BUFFERING: {
-      gint pct = 0;
-      gst_message_parse_buffering(msg, &pct);
-      send_event_bool(self, "buffering", pct < 100);
-      break;
-    }
-    default:
-      break;
+static void ensure_player(FlutterCacheVideoPlayerPlugin* self) {
+  if (self->player) return;
+  auto* player = new MpvPlayer();
+  std::string err;
+  if (!player->Initialize(&err)) {
+    delete player;
+    send_event_str(self, "error", ("mpv init failed: " + err).c_str());
+    return;
   }
-  return TRUE;
-}
-
-static gboolean position_timer_cb(gpointer user_data) {
-  auto* self = static_cast<FlutterCacheVideoPlayerPlugin*>(user_data);
-  if (!self->pipeline) return TRUE;
-
-  gint64 pos = 0;
-  if (gst_element_query_position(self->pipeline, GST_FORMAT_TIME, &pos)) {
-    send_event_int(self, "position",
-                   static_cast<int64_t>(pos / GST_MSECOND));
-  }
-  return TRUE;
-}
-
-// ── 播放器控制 / Player control ──
-
-static void cleanup_pipeline(FlutterCacheVideoPlayerPlugin* self) {
-  if (self->position_timer_id) {
-    g_source_remove(self->position_timer_id);
-    self->position_timer_id = 0;
-  }
-  if (self->pipeline) {
-    gst_element_set_state(self->pipeline, GST_STATE_NULL);
-    gst_object_unref(self->pipeline);
-    self->pipeline = nullptr;
-  }
+  player->SetWakeupHandler([self]() {
+    if (!self->drain_source_id) self->drain_source_id = g_idle_add(drain_events_cb, self);
+  });
+  player->SetUpdateHandler([self]() {
+    if (!self->render_source_id) self->render_source_id = g_idle_add(render_cb, self);
+  });
+  player->SetOnPosition([self](int64_t ms) { send_event_int(self, "position", ms); });
+  player->SetOnDuration([self](int64_t ms) { send_event_int(self, "duration", ms); });
+  player->SetOnPlaying([self](bool p) { send_event_bool(self, "playing", p); });
+  player->SetOnBuffering([self](bool b) { send_event_bool(self, "buffering", b); });
+  player->SetOnCompleted([self]() { send_event_null(self, "completed"); });
+  player->SetOnError([self](const std::string& m) { send_event_str(self, "error", m.c_str()); });
+  player->SetOnFrame([self](const uint8_t* rgba, uint32_t w, uint32_t h) {
+    if (self->texture) video_texture_write(self->texture, rgba, w, h);
+  });
+  player->SetOnVideoSize([self](int64_t w, int64_t h) {
+    if (w <= 0 || h <= 0) return;
+    FlValue* map = fl_value_new_map();
+    fl_value_set_string_take(map, "width", fl_value_new_int(w));
+    fl_value_set_string_take(map, "height", fl_value_new_int(h));
+    send_event(self, "videoSize", map);
+  });
+  self->player = player;
 }
 
 static int64_t player_create(FlutterCacheVideoPlayerPlugin* self) {
-  self->texture = video_texture_new();
-  fl_texture_registrar_register_texture(self->texture_registrar,
-                                         FL_TEXTURE(self->texture));
-  self->texture_id =
-      fl_texture_get_id(FL_TEXTURE(self->texture));
+  ensure_player(self);
+  if (!self->texture) {
+    self->texture = video_texture_new();
+    fl_texture_registrar_register_texture(self->texture_registrar, FL_TEXTURE(self->texture));
+    self->texture_id = fl_texture_get_id(FL_TEXTURE(self->texture));
+  }
   return self->texture_id;
 }
 
-static void player_open(FlutterCacheVideoPlayerPlugin* self,
-                         const gchar* url) {
-  cleanup_pipeline(self);
-
-  self->pipeline = gst_element_factory_make("playbin3", "playbin");
-  if (!self->pipeline) {
-    self->pipeline = gst_element_factory_make("playbin", "playbin");
-  }
-  if (!self->pipeline) {
-    send_event_str(self, "error", "Failed to create GStreamer pipeline");
-    return;
-  }
-
-  g_object_set(self->pipeline, "uri", url, nullptr);
-
-  // 创建 appsink 用于视频帧提取 / Create appsink for video frame extraction
-  GstElement* sink = gst_element_factory_make("appsink", "videosink");
-  GstCaps* caps = gst_caps_new_simple("video/x-raw", "format",
-                                       G_TYPE_STRING, "BGRA", nullptr);
-  g_object_set(sink, "caps", caps, "emit-signals", TRUE, "sync", TRUE,
-               "max-buffers", 1, "drop", TRUE, nullptr);
-  gst_caps_unref(caps);
-  g_signal_connect(sink, "new-sample", G_CALLBACK(on_new_sample), self);
-  g_object_set(self->pipeline, "video-sink", sink, nullptr);
-
-  // 总线消息监听 / Bus message watch
-  GstBus* bus = gst_element_get_bus(self->pipeline);
-  gst_bus_add_watch(bus, on_bus_message, self);
-  gst_object_unref(bus);
-
-  gst_element_set_state(self->pipeline, GST_STATE_PLAYING);
-
-  // 位置更新定时器 200ms / Position update timer 200ms
-  self->position_timer_id =
-      g_timeout_add(200, position_timer_cb, self);
-
-  send_event_bool(self, "buffering", TRUE);
-}
-
-static void player_play(FlutterCacheVideoPlayerPlugin* self) {
-  if (self->pipeline)
-    gst_element_set_state(self->pipeline, GST_STATE_PLAYING);
-}
-
-static void player_pause(FlutterCacheVideoPlayerPlugin* self) {
-  if (self->pipeline)
-    gst_element_set_state(self->pipeline, GST_STATE_PAUSED);
-}
-
-static void player_seek(FlutterCacheVideoPlayerPlugin* self, int64_t ms) {
-  if (!self->pipeline) return;
-  gst_element_seek_simple(self->pipeline, GST_FORMAT_TIME,
-                           static_cast<GstSeekFlags>(
-                               GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT),
-                           ms * GST_MSECOND);
-}
-
-static void player_set_volume(FlutterCacheVideoPlayerPlugin* self,
-                               double vol) {
-  if (self->pipeline) g_object_set(self->pipeline, "volume", vol, nullptr);
-}
-
-static void player_set_speed(FlutterCacheVideoPlayerPlugin* self,
-                              double speed) {
-  if (!self->pipeline) return;
-  gint64 pos = 0;
-  gst_element_query_position(self->pipeline, GST_FORMAT_TIME, &pos);
-  if (speed > 0) {
-    gst_element_seek(self->pipeline, speed, GST_FORMAT_TIME,
-                     static_cast<GstSeekFlags>(
-                         GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE),
-                     GST_SEEK_TYPE_SET, pos,
-                     GST_SEEK_TYPE_NONE, GST_CLOCK_TIME_NONE);
-  }
-}
-
 static void player_dispose(FlutterCacheVideoPlayerPlugin* self) {
-  cleanup_pipeline(self);
+  if (self->drain_source_id) { g_source_remove(self->drain_source_id); self->drain_source_id = 0; }
+  if (self->render_source_id) { g_source_remove(self->render_source_id); self->render_source_id = 0; }
+  if (self->player) { delete self->player; self->player = nullptr; }
   if (self->texture) {
-    fl_texture_registrar_unregister_texture(self->texture_registrar,
-                                             FL_TEXTURE(self->texture));
+    fl_texture_registrar_unregister_texture(self->texture_registrar, FL_TEXTURE(self->texture));
     g_object_unref(self->texture);
     self->texture = nullptr;
     self->texture_id = -1;
   }
 }
 
-// ── MethodChannel 处理 / MethodChannel handler ──
+static gchar* default_cover_dir() {
+  const gchar* tmp = g_get_tmp_dir();
+  gchar* dir = g_build_filename(tmp, "flutter_cache_video_player", "covers", nullptr);
+  g_mkdir_with_parents(dir, 0700);
+  return dir;
+}
 
-static void handle_method_call(FlutterCacheVideoPlayerPlugin* self,
-                                FlMethodCall* method_call) {
+static void handle_method_call(FlutterCacheVideoPlayerPlugin* self, FlMethodCall* method_call) {
   g_autoptr(FlMethodResponse) response = nullptr;
   const gchar* method = fl_method_call_get_name(method_call);
 
@@ -385,123 +200,146 @@ static void handle_method_call(FlutterCacheVideoPlayerPlugin* self,
     int64_t id = player_create(self);
     g_autoptr(FlValue) result = fl_value_new_int(id);
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
-
   } else if (strcmp(method, "open") == 0) {
+    ensure_player(self);
     FlValue* args = fl_method_call_get_args(method_call);
-    FlValue* url_val = fl_value_lookup_string(args, "url");
-    if (url_val) {
-      player_open(self, fl_value_get_string(url_val));
+    FlValue* url_val = args ? fl_value_lookup_string(args, "url") : nullptr;
+    if (url_val && self->player) {
+      self->player->Open(fl_value_get_string(url_val));
+      send_event_bool(self, "buffering", TRUE);
     }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-
   } else if (strcmp(method, "play") == 0) {
-    player_play(self);
+    if (self->player) self->player->Play();
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-
   } else if (strcmp(method, "pause") == 0) {
-    player_pause(self);
+    if (self->player) self->player->Pause();
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-
   } else if (strcmp(method, "seek") == 0) {
     FlValue* args = fl_method_call_get_args(method_call);
-    FlValue* pos = fl_value_lookup_string(args, "position");
-    if (pos) player_seek(self, fl_value_get_int(pos));
+    FlValue* pos = args ? fl_value_lookup_string(args, "position") : nullptr;
+    if (pos && self->player) self->player->Seek(fl_value_get_int(pos));
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-
   } else if (strcmp(method, "setVolume") == 0) {
     FlValue* args = fl_method_call_get_args(method_call);
-    FlValue* vol = fl_value_lookup_string(args, "volume");
-    if (vol) player_set_volume(self, fl_value_get_float(vol));
+    FlValue* vol = args ? fl_value_lookup_string(args, "volume") : nullptr;
+    if (vol && self->player) self->player->SetVolume(fl_value_get_float(vol));
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-
   } else if (strcmp(method, "setSpeed") == 0) {
     FlValue* args = fl_method_call_get_args(method_call);
-    FlValue* spd = fl_value_lookup_string(args, "speed");
-    if (spd) player_set_speed(self, fl_value_get_float(spd));
+    FlValue* spd = args ? fl_value_lookup_string(args, "speed") : nullptr;
+    if (spd && self->player) self->player->SetSpeed(fl_value_get_float(spd));
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-
   } else if (strcmp(method, "dispose") == 0) {
     player_dispose(self);
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  } else if (strcmp(method, "takeSnapshot") == 0) {
+    if (!self->player) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new("NO_PLAYER", "Player not initialized", nullptr));
+    } else {
+      std::vector<uint8_t> bytes;
+      std::string err;
+      if (self->player->TakeSnapshot(&bytes, &err)) {
+        g_autoptr(FlValue) data = fl_value_new_uint8_list(bytes.data(), bytes.size());
+        response = FL_METHOD_RESPONSE(fl_method_success_response_new(data));
+      } else {
+        response = FL_METHOD_RESPONSE(fl_method_error_response_new("SNAPSHOT_FAIL", err.c_str(), nullptr));
+      }
+    }
+  } else if (strcmp(method, "extractCovers") == 0) {
+    FlValue* args = fl_method_call_get_args(method_call);
+    const gchar* url = "";
+    int count = 5, candidates = 15;
+    double min_brightness = 0.08;
+    std::string output_dir;
+    if (args) {
+      FlValue* v_url = fl_value_lookup_string(args, "url");
+      FlValue* v_count = fl_value_lookup_string(args, "count");
+      FlValue* v_cand = fl_value_lookup_string(args, "candidates");
+      FlValue* v_minb = fl_value_lookup_string(args, "minBrightness");
+      FlValue* v_dir = fl_value_lookup_string(args, "outputDir");
+      if (v_url) url = fl_value_get_string(v_url);
+      if (v_count) count = static_cast<int>(fl_value_get_int(v_count));
+      if (v_cand) candidates = static_cast<int>(fl_value_get_int(v_cand));
+      if (v_minb) min_brightness = fl_value_get_float(v_minb);
+      if (v_dir && fl_value_get_length(v_dir) > 0) output_dir = fl_value_get_string(v_dir);
+    }
+    if (output_dir.empty()) { g_autofree gchar* d = default_cover_dir(); output_dir = d; }
+    else g_mkdir_with_parents(output_dir.c_str(), 0700);
 
+    auto frames = MpvPlayer::ExtractCovers(url, count, candidates, min_brightness, output_dir);
+    g_autoptr(FlValue) list = fl_value_new_list();
+    for (const auto& f : frames) {
+      g_autoptr(FlValue) m = fl_value_new_map();
+      fl_value_set_string_take(m, "path", fl_value_new_string(f.path.c_str()));
+      fl_value_set_string_take(m, "positionMs", fl_value_new_int(f.position_ms));
+      fl_value_set_string_take(m, "brightness", fl_value_new_float(f.brightness));
+      fl_value_append(list, m);
+    }
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(list));
   } else if (strcmp(method, "getPlatformVersion") == 0) {
     response = get_platform_version();
-
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }
-
   fl_method_call_respond(method_call, response, nullptr);
 }
 
 FlMethodResponse* get_platform_version() {
   struct utsname uname_data = {};
   uname(&uname_data);
-  g_autofree gchar* version =
-      g_strdup_printf("Linux %s", uname_data.version);
+  g_autofree gchar* version = g_strdup_printf("Linux %s", uname_data.version);
   g_autoptr(FlValue) result = fl_value_new_string(version);
   return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
 }
-
-// ── GObject 生命周期 / GObject lifecycle ──
 
 static void flutter_cache_video_player_plugin_dispose(GObject* object) {
   auto* self = FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(object);
   player_dispose(self);
   g_clear_object(&self->method_channel);
   g_clear_object(&self->event_channel);
-  G_OBJECT_CLASS(flutter_cache_video_player_plugin_parent_class)
-      ->dispose(object);
+  G_OBJECT_CLASS(flutter_cache_video_player_plugin_parent_class)->dispose(object);
 }
 
-static void flutter_cache_video_player_plugin_class_init(
-    FlutterCacheVideoPlayerPluginClass* klass) {
-  G_OBJECT_CLASS(klass)->dispose =
-      flutter_cache_video_player_plugin_dispose;
+static void flutter_cache_video_player_plugin_class_init(FlutterCacheVideoPlayerPluginClass* klass) {
+  G_OBJECT_CLASS(klass)->dispose = flutter_cache_video_player_plugin_dispose;
 }
 
-static void flutter_cache_video_player_plugin_init(
-    FlutterCacheVideoPlayerPlugin* self) {
+static void flutter_cache_video_player_plugin_init(FlutterCacheVideoPlayerPlugin* self) {
   self->texture = nullptr;
   self->texture_id = -1;
-  self->pipeline = nullptr;
-  self->position_timer_id = 0;
+  self->player = nullptr;
+  self->drain_source_id = 0;
+  self->render_source_id = 0;
 }
 
-static void method_call_cb(FlMethodChannel* channel,
-                            FlMethodCall* method_call,
-                            gpointer user_data) {
-  auto* plugin = FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(user_data);
-  handle_method_call(plugin, method_call);
+static void method_call_cb(FlMethodChannel*, FlMethodCall* method_call, gpointer user_data) {
+  handle_method_call(FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(user_data), method_call);
 }
 
-// ── 插件注册 / Plugin registration ──
+static FlMethodErrorResponse* event_channel_listen_cb(FlEventChannel*, FlValue*, gpointer) { return nullptr; }
+static FlMethodErrorResponse* event_channel_cancel_cb(FlEventChannel*, FlValue*, gpointer) { return nullptr; }
 
-void flutter_cache_video_player_plugin_register_with_registrar(
-    FlPluginRegistrar* registrar) {
-  gst_init(nullptr, nullptr);
+void flutter_cache_video_player_plugin_register_with_registrar(FlPluginRegistrar* registrar) {
+  FlutterCacheVideoPlayerPlugin* plugin = FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(
+      g_object_new(flutter_cache_video_player_plugin_get_type(), nullptr));
 
-  FlutterCacheVideoPlayerPlugin* plugin =
-      FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(
-          g_object_new(flutter_cache_video_player_plugin_get_type(), nullptr));
-
-  plugin->texture_registrar =
-      fl_plugin_registrar_get_texture_registrar(registrar);
+  plugin->texture_registrar = fl_plugin_registrar_get_texture_registrar(registrar);
 
   g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
 
-  // MethodChannel
   plugin->method_channel = fl_method_channel_new(
       fl_plugin_registrar_get_messenger(registrar),
       "flutter_cache_video_player/player", FL_METHOD_CODEC(codec));
-  fl_method_channel_set_method_call_handler(
-      plugin->method_channel, method_call_cb,
-      g_object_ref(plugin), g_object_unref);
+  fl_method_channel_set_method_call_handler(plugin->method_channel, method_call_cb,
+                                            g_object_ref(plugin), g_object_unref);
 
-  // EventChannel
   plugin->event_channel = fl_event_channel_new(
       fl_plugin_registrar_get_messenger(registrar),
       "flutter_cache_video_player/player/events", FL_METHOD_CODEC(codec));
+  fl_event_channel_set_stream_handlers(plugin->event_channel, event_channel_listen_cb,
+                                       event_channel_cancel_cb, plugin, nullptr);
 
+  ensure_player(plugin);
   g_object_unref(plugin);
 }

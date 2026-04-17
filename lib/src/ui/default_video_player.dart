@@ -46,8 +46,10 @@ class DefaultVideoPlayer extends StatefulWidget {
   final FlutterCacheVideoPlayerController controller;
 
   /// 视频宽高比。当 [fill] 为 true 时此属性被忽略，播放器会铺满外部约束。
-  /// Aspect ratio used when [fill] is false.
-  final double aspectRatio;
+  /// 为 null（默认）时，使用原生播放器上报的真实宽高比，避免竖向视频被拉伸。
+  /// Aspect ratio used when [fill] is false. `null` (default) follows the
+  /// native video's natural aspect ratio.
+  final double? aspectRatio;
 
   /// 是否铺满父约束（常用于全屏容器或 SizedBox.expand）。
   /// When true the player fills the available space instead of using aspect ratio.
@@ -122,7 +124,7 @@ class DefaultVideoPlayer extends StatefulWidget {
   const DefaultVideoPlayer({
     super.key,
     required this.controller,
-    this.aspectRatio = 16 / 9,
+    this.aspectRatio,
     this.fill = false,
     this.skipDuration = const Duration(seconds: 10),
     this.autoHideDelay = const Duration(seconds: 3),
@@ -328,7 +330,17 @@ class _DefaultVideoPlayerState extends State<DefaultVideoPlayer> {
     if (widget.fill) {
       return stack;
     }
-    return AspectRatio(aspectRatio: widget.aspectRatio, child: stack);
+    // Resolve the effective aspect ratio: explicit value > native reported
+    // video ratio > 16:9 placeholder. `watch` keeps this reactive so the
+    // layout updates once the native player publishes the real size.
+    final double effectiveAspectRatio;
+    if (widget.aspectRatio != null) {
+      effectiveAspectRatio = widget.aspectRatio!;
+    } else {
+      final reported = widget.controller.videoAspectRatio.watch(context);
+      effectiveAspectRatio = (reported != null && reported > 0) ? reported : 16 / 9;
+    }
+    return AspectRatio(aspectRatio: effectiveAspectRatio, child: stack);
   }
 }
 

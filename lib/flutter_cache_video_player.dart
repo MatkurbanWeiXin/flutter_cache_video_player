@@ -1,11 +1,13 @@
 // Core
 export 'src/core/constants.dart';
 export 'src/core/platform_detector.dart';
+export 'src/core/video_source.dart';
 
 // Data models
 export 'src/data/models/media_index.dart';
 export 'src/data/models/chunk_bitmap.dart';
 export 'src/data/models/playback_history.dart';
+export 'src/data/models/video_cover_frame.dart';
 export 'src/data/enums/play_state.dart';
 
 // Data repositories
@@ -42,3 +44,6 @@ export 'src/utils/size_formatter.dart';
 
 // App
 export 'src/cache_video_player.dart';
+
+// Re-export XFile so consumers can use it without adding cross_file explicitly.
+export 'package:cross_file/cross_file.dart' show XFile;

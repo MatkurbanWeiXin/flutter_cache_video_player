@@ -28,8 +28,8 @@ support and minimal bandwidth waste.
 | Android  | ExoPlayer (Media3)                        |
 | iOS      | AVPlayer                                  |
 | macOS    | AVPlayer                                  |
-| Linux    | GStreamer (playbin3)                      |
-| Windows  | Media Foundation (IMFMediaEngine + D3D11) |
+| Linux    | libmpv (software rendering)               |
+| Windows  | libmpv (software rendering)               |
 | Web      | HTML5 `<video>`                           |
 
 ## Architecture
@@ -60,7 +60,7 @@ support and minimal bandwidth waste.
 │  └─────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────┤
 │  Native Platform Layer                           │
-│  ExoPlayer │ AVPlayer │ GStreamer │ MF │ HTML5   │
+│  ExoPlayer │ AVPlayer │  libmpv  │ libmpv │ HTML5  │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -142,12 +142,34 @@ Add to `macos/Runner/Info.plist`:
 
 #### Linux
 
-Install GStreamer development libraries:
+Install libmpv development libraries:
 
 ```bash
-sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+# Debian / Ubuntu
+sudo apt install libmpv-dev
+# Fedora
+sudo dnf install mpv-libs-devel
+# Arch
+sudo pacman -S mpv
 ```
+
+#### Windows
+
+The Windows backend uses libmpv through software rendering. Download a
+prebuilt libmpv SDK (for example the `mpv-dev-x86_64-*.7z` from the mpv
+[releases page](https://mpv.io/installation/)) and extract it somewhere like
+`C:\libs\mpv-dev`. The directory must contain `include/mpv/*.h`, a `libmpv.dll.a`
+(or `mpv.lib`) import library, and the runtime `libmpv-2.dll`.
+
+Pass the path when building:
+
+```bash
+flutter build windows --dart-define=MPV_DIR=C:\libs\mpv-dev
+# or via CMake directly
+cmake -DMPV_DIR=C:/libs/mpv-dev ...
+```
+
+`libmpv-2.dll` is bundled into the Flutter build output automatically.
 
 ## Configuration Reference
 
@@ -173,7 +195,7 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 3. **Cache** — Each downloaded chunk is saved as a separate file; a bitmap tracks which chunks are available
 4. **Serve** — The proxy server reads cached chunks from disk and streams them to the native player; if a chunk is
    missing, it waits for the download to complete
-5. **Play** — The native player (ExoPlayer/AVPlayer/GStreamer/MF/HTML5) renders frames via Flutter Texture
+5. **Play** — The native player (ExoPlayer/AVPlayer/libmpv/HTML5) renders frames via Flutter Texture
 
 ## Widgets
 
@@ -310,6 +332,87 @@ Widget build(BuildContext context) {
 - For landscape/fullscreen, wrap the widget in your own route and set `fill:
   true`; combine with `SystemChrome.setPreferredOrientations` /
   `SystemChrome.setEnabledSystemUIMode` as needed.
+
+## Sources & Playback
+
+The controller exposes three explicit entry points plus a generic one. Only
+network sources are piped through the caching proxy; local files and Flutter
+assets are handed directly to the native player.
+
+```dart
+// 1) Network — cached through the built-in HTTP proxy.
+await controller.playNetwork('https://example.com/video.mp4');
+
+// 2) Local file — absolute path or file:// URI. No proxy, no caching.
+await controller.playFile('/absolute/path/to/movie.mp4');
+
+// 3) Flutter asset — first call extracts the asset to the temp directory.
+await controller.playAsset('assets/videos/intro.mp4');
+
+// 4) Generic — use when you already have a VideoSource.
+await controller.playSource(VideoSource.network('https://...'));
+```
+
+Legacy `controller.open(url)` is kept and is equivalent to `playNetwork(url)`.
+
+When using `playAsset`, declare the asset under your app's `pubspec.yaml`:
+
+```yaml
+flutter:
+  assets:
+    - assets/videos/intro.mp4
+```
+
+## Snapshots & Cover Candidates
+
+### `takeSnapshot()` — capture the current frame
+
+Captures whatever the native player is rendering right now and returns a PNG
+as an [`XFile`]. On native platforms the `XFile.path` points to a file on
+disk; on web it is a `blob:` / `data:` URL.
+
+```dart
+final XFile png = await controller.takeSnapshot();
+// native: File(png.path)
+// web   : Image.network(png.path)
+```
+
+### `extractCoverCandidates()` — pick the best cover frames
+
+Scans a video and returns a small, ranked list of non-black candidate frames.
+The algorithm skips the first/last 5 % of the timeline, samples `count * 3`
+evenly-distributed frames from the middle 90 %, computes Rec. 601 luma on a
+downsampled buffer, drops frames dimmer than `minBrightness`, and returns the
+top `count` frames sorted by brightness **descending**.
+
+```dart
+final frames = await FlutterCacheVideoPlayer.extractCoverCandidates(
+  VideoSource.network('https://example.com/video.mp4'),
+  count: 5,          // up to 5 results
+  minBrightness: 0.08,
+);
+
+for (final f in frames) {
+  print('${f.position} → ${f.image.path} (brightness=${f.brightness})');
+}
+```
+
+Works with any `VideoSource` (`network`, `file`, `asset`).
+
+### Platform support for snapshot / covers
+
+| Platform | `takeSnapshot` | `extractCoverCandidates` |
+|----------|:--------------:|:------------------------:|
+| iOS      | ✅ AVPlayerItemVideoOutput + Core Image | ✅ AVAssetImageGenerator |
+| Android  | ✅ MediaMetadataRetriever | ✅ MediaMetadataRetriever |
+| macOS    | ✅ AVPlayerItemVideoOutput + Core Image | ✅ AVAssetImageGenerator |
+| Web      | ✅ `<canvas>.toDataURL` | ✅ offscreen `<video>` + `<canvas>` (CORS required) |
+| Windows  | ✅ PNG bytes via libmpv `screenshot-to-file` | ✅ libmpv-based extraction |
+| Linux    | ✅ PNG bytes via libmpv `screenshot-to-file` | ✅ libmpv-based extraction |
+
+On Web, cover extraction requires the video server to send CORS headers
+allowing `crossOrigin="anonymous"` — otherwise the canvas is tainted and the
+method returns an empty list.
 
 ## Example
 

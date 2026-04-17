@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:cross_file/cross_file.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:signals_flutter/signals_flutter.dart';
 
 /// 原生播放器控制器，通过 MethodChannel 和 EventChannel 与各平台原生播放器通信。
@@ -22,6 +26,11 @@ class NativePlayerController {
   final errorSignal = signal<String?>(null);
 
   final completedSignal = signal(0);
+
+  /// 视频原始分辨率（已考虑显示方向 / 像素比）；尚未知时为 `Size.zero`。
+  /// Natural video size (already accounting for display rotation / pixel
+  /// aspect ratio). `Size.zero` until reported by the native player.
+  final videoSizeSignal = signal<Size>(Size.zero);
 
   /// 原生纹理 ID，用于 Flutter Texture widget 渲染。
   /// Native texture ID for Flutter Texture widget rendering.
@@ -67,6 +76,17 @@ class NativePlayerController {
         errorSignal.set(message, force: true);
       case 'completed':
         completedSignal.set(completedSignal.value + 1, force: true);
+      case 'videoSize':
+        final value = event['value'];
+        if (value is Map) {
+          final w = (value['width'] as num?)?.toDouble() ?? 0;
+          final h = (value['height'] as num?)?.toDouble() ?? 0;
+          if (w > 0 && h > 0) {
+            videoSizeSignal.value = Size(w, h);
+          } else {
+            videoSizeSignal.value = Size.zero;
+          }
+        }
       default:
     }
   }
@@ -85,6 +105,7 @@ class NativePlayerController {
     playingSignal.value = false;
     bufferingSignal.value = false;
     errorSignal.value = null;
+    videoSizeSignal.value = Size.zero;
     await _methodChannel.invokeMethod('open', {'url': url});
   }
 
@@ -127,5 +148,67 @@ class NativePlayerController {
       await _methodChannel.invokeMethod('dispose');
     } catch (_) {}
     _textureId = null;
+  }
+
+  /// 截取当前播放画面，返回 PNG [XFile]。
+  /// Snapshot the current frame as a PNG [XFile].
+  Future<XFile> takeSnapshot({String? savePath}) async {
+    final raw = await _methodChannel.invokeMethod<dynamic>('takeSnapshot');
+    if (raw == null) {
+      throw StateError('Native player returned no snapshot data.');
+    }
+    if (kIsWeb) {
+      // Web returns either a data URL string or a Uint8List.
+      if (raw is String) {
+        return XFile(raw, mimeType: 'image/png');
+      }
+      final bytes = _asUint8List(raw);
+      return XFile.fromData(bytes, mimeType: 'image/png', name: _defaultSnapshotName());
+    }
+    final bytes = _asUint8List(raw);
+    final outPath = savePath ?? await _defaultSnapshotPath();
+    final file = File(outPath);
+    await file.parent.create(recursive: true);
+    await file.writeAsBytes(bytes, flush: true);
+    return XFile(outPath, mimeType: 'image/png');
+  }
+
+  /// 调用原生 `extractCovers`，返回 [{positionMs, brightness, path}] 列表。
+  /// Invokes the native `extractCovers` and returns the raw list of
+  /// `{positionMs, brightness, path}` maps.
+  Future<List<Map<String, dynamic>>> invokeExtractCovers({
+    required String url,
+    required int count,
+    required int candidateCount,
+    required double minBrightness,
+    required String outputDir,
+  }) async {
+    final raw = await _methodChannel.invokeMethod<dynamic>('extractCovers', {
+      'url': url,
+      'count': count,
+      'candidates': candidateCount,
+      'minBrightness': minBrightness,
+      'outputDir': outputDir,
+    });
+    if (raw == null) return const <Map<String, dynamic>>[];
+    final list = (raw as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    return list;
+  }
+
+  static Uint8List _asUint8List(dynamic raw) {
+    if (raw is Uint8List) return raw;
+    if (raw is List<int>) return Uint8List.fromList(raw);
+    throw StateError('Unsupported snapshot payload: ${raw.runtimeType}');
+  }
+
+  static String _defaultSnapshotName() {
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    return 'snapshot-$ts.png';
+  }
+
+  static Future<String> _defaultSnapshotPath() async {
+    final dir = await getTemporaryDirectory();
+    final name = _defaultSnapshotName();
+    return '${dir.path}/flutter_cache_video_player/snapshots/$name';
   }
 }

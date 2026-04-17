@@ -20,6 +20,8 @@ set(PLUGIN_NAME "flutter_cache_video_player_plugin")
 list(APPEND PLUGIN_SOURCES
   "flutter_cache_video_player_plugin.cpp"
   "flutter_cache_video_player_plugin.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native/mpv_player.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native/mpv_player.h"
 )
 
 # Define the plugin library target. Its name must not be changed (see comment
@@ -45,20 +47,61 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 
+# libmpv SDK location. Expected layout:
+#   ${MPV_DIR}/include/mpv/*.h
+#   ${MPV_DIR}/libmpv.dll.a      (or mpv.lib)
+#   ${MPV_DIR}/libmpv-2.dll      (runtime, bundled with plugin)
+# You can override via -DMPV_DIR=path when invoking CMake or by setting the
+# MPV_DIR environment variable.
+if(NOT DEFINED MPV_DIR)
+  if(DEFINED ENV{MPV_DIR})
+    set(MPV_DIR "$ENV{MPV_DIR}")
+  else()
+    set(MPV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mpv-dev")
+  endif()
+endif()
+set(MPV_DIR "${MPV_DIR}" CACHE PATH "Path to the libmpv SDK")
+
+find_library(MPV_LIBRARY
+  NAMES mpv libmpv libmpv.dll
+  PATHS "${MPV_DIR}" "${MPV_DIR}/lib"
+  NO_DEFAULT_PATH
+)
+if(NOT MPV_LIBRARY)
+  message(FATAL_ERROR "libmpv import library not found under ${MPV_DIR}. "
+    "Download the libmpv dev package (e.g. mpv-dev-x86_64) and set -DMPV_DIR=<path>.")
+endif()
+
+find_file(MPV_RUNTIME_DLL
+  NAMES libmpv-2.dll mpv-2.dll libmpv-1.dll mpv-1.dll
+  PATHS "${MPV_DIR}" "${MPV_DIR}/bin"
+  NO_DEFAULT_PATH
+)
+
 # Source include directories and library dependencies. Add any plugin-specific
 # dependencies here.
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(${PLUGIN_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native"
+  "${MPV_DIR}/include")
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin
-  mfplat mfuuid d3d11 ole32)
+  "${MPV_LIBRARY}")
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
 # external build triggered from this build file.
-set(flutter_cache_video_player_bundled_libraries
-  ""
-  PARENT_SCOPE
-)
+if(MPV_RUNTIME_DLL)
+  set(flutter_cache_video_player_bundled_libraries
+    "${MPV_RUNTIME_DLL}"
+    PARENT_SCOPE
+  )
+else()
+  set(flutter_cache_video_player_bundled_libraries
+    ""
+    PARENT_SCOPE
+  )
+endif()
 
 # === Tests ===
 # These unit tests can be run from a terminal after building the example, or
@@ -96,8 +139,12 @@ add_executable(${TEST_RUNNER}
 )
 apply_standard_settings(${TEST_RUNNER})
 target_compile_options(${TEST_RUNNER} PRIVATE /utf-8)
-target_include_directories(${TEST_RUNNER} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(${TEST_RUNNER} PRIVATE flutter_wrapper_plugin)
+target_include_directories(${TEST_RUNNER} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native"
+  "${MPV_DIR}/include")
+target_link_libraries(${TEST_RUNNER} PRIVATE flutter_wrapper_plugin
+  "${MPV_LIBRARY}")
 target_link_libraries(${TEST_RUNNER} PRIVATE gtest_main gmock)
 # flutter_wrapper_plugin has link dependencies on the Flutter DLL.
 add_custom_command(TARGET ${TEST_RUNNER} POST_BUILD

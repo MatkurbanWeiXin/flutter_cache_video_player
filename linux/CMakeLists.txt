@@ -14,6 +14,7 @@ set(PLUGIN_NAME "flutter_cache_video_player_plugin")
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
   "flutter_cache_video_player_plugin.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native/mpv_player.cc"
 )
 
 # Define the plugin library target. Its name must not be changed (see comment
@@ -37,14 +38,17 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 # Source include directories and library dependencies. Add any plugin-specific
 # dependencies here.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-video-1.0)
+pkg_check_modules(MPV REQUIRED mpv)
 
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_include_directories(${PLUGIN_NAME} PRIVATE ${GSTREAMER_INCLUDE_DIRS})
+target_include_directories(${PLUGIN_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native"
+  ${MPV_INCLUDE_DIRS})
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
-target_link_libraries(${PLUGIN_NAME} PRIVATE ${GSTREAMER_LIBRARIES})
+target_link_libraries(${PLUGIN_NAME} PRIVATE ${MPV_LIBRARIES})
+target_compile_options(${PLUGIN_NAME} PRIVATE ${MPV_CFLAGS_OTHER})
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
@@ -91,9 +95,13 @@ add_executable(${TEST_RUNNER}
   ${PLUGIN_SOURCES}
 )
 apply_standard_settings(${TEST_RUNNER})
-target_include_directories(${TEST_RUNNER} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(${TEST_RUNNER} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../native"
+  ${MPV_INCLUDE_DIRS})
 target_link_libraries(${TEST_RUNNER} PRIVATE flutter)
 target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::GTK)
+target_link_libraries(${TEST_RUNNER} PRIVATE ${MPV_LIBRARIES})
 target_link_libraries(${TEST_RUNNER} PRIVATE gtest_main gmock)
 
 # Enable automatic test discovery.

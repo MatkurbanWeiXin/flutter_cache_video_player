@@ -1,39 +1,39 @@
 import 'package:flutter/foundation.dart';
+
+import '../core/video_source.dart';
 import '../proxy/proxy_server.dart';
 
-/// 平台播放工厂，根据平台返回代理 URL 或原始 URL。
-/// Platform player factory returning a proxy URL on native or the original URL on web.
+/// 平台播放工厂，根据来源决定是否走本地缓存代理。
+///
+/// Platform player factory. Decides whether a given [VideoSource] should be
+/// routed through the local HTTP cache proxy (network only, native only) or
+/// consumed directly by the native player (file / asset / web).
 class PlatformPlayerFactory {
   final ProxyCacheServer? proxyServer;
 
   PlatformPlayerFactory({this.proxyServer});
 
-  /// 创建播放器所用的媒体 URL。
-  /// 原生端：先预初始化缓存元数据，然后始终走本地 HTTP 代理（代理会发送正确的 Content-Type）。
-  /// Web 端：使用原始 URL。
+  /// 为指定来源构造原生播放器可消费的 URL。
   ///
-  /// Creates the media URL for the player.
-  /// Native: pre-initializes cache metadata, then always uses local HTTP proxy
-  /// (proxy sends correct Content-Type headers, avoiding file-extension issues).
-  /// Web: uses original URL.
-  Future<String> createMediaUrl(String originalUrl) async {
+  /// * [NetworkVideoSource] 且非 Web：预热 `initCache`，再返回代理 URL；失败时回退直连。
+  /// * 其它来源：直接返回 [resolvedNativeUrl]。
+  ///
+  /// Build the URL the native player will actually open. Network sources on
+  /// native platforms are piped through the caching proxy; all other sources
+  /// are handed the native URL as-is.
+  Future<String> createMediaUrl(VideoSource source, String resolvedNativeUrl) async {
+    if (source is! NetworkVideoSource) {
+      return resolvedNativeUrl;
+    }
     if (kIsWeb || proxyServer == null) {
-      return originalUrl;
+      return resolvedNativeUrl;
     }
 
-    // 预初始化：在返回代理 URL 前先从源服务器获取元数据（大小、MIME 类型）。
-    // 这样当原生播放器连接代理时，MediaIndex 已就绪，代理可立即响应。
-    // 如果初始化失败（网络异常等），退化为直接使用原始 URL 播放。
-    // Pre-initialize: fetch metadata (size, MIME type) from origin server before
-    // returning the proxy URL. When the native player connects, existing
-    // MediaIndex lets the proxy respond immediately instead of blocking.
-    // On failure (network error etc.), fall back to the original URL.
     try {
-      await proxyServer!.initCache(originalUrl);
-    } catch (e) {
-      return originalUrl;
+      await proxyServer!.initCache(resolvedNativeUrl);
+    } catch (_) {
+      return resolvedNativeUrl;
     }
-
-    return proxyServer!.proxyUrl(originalUrl);
+    return proxyServer!.proxyUrl(resolvedNativeUrl);
   }
 }

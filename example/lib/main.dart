@@ -1,3 +1,6 @@
+import 'dart:io' show File;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_cache_video_player/flutter_cache_video_player.dart';
@@ -114,7 +117,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   Future<void> _openCurrent({bool resumeHistory = false}) async {
     final item = _demoPlaylist[_index];
-    await _controller.open(item.url, resumeHistory: resumeHistory);
+    await _controller.playNetwork(item.url, resumeHistory: resumeHistory);
   }
 
   Future<void> _playAt(int index) async {
@@ -190,11 +193,75 @@ class _PlayerPageState extends State<PlayerPage> {
                   _toggleFullscreen();
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Take snapshot (PNG)'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _takeSnapshot();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.image_outlined),
+                title: const Text('Extract cover candidates'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _extractCovers();
+                },
+              ),
             ],
           ),
         );
       },
     );
+  }
+
+  Future<void> _takeSnapshot() async {
+    try {
+      final xfile = await _controller.takeSnapshot();
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (_) => _SnapshotDialog(file: xfile),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Snapshot failed: $e')));
+    }
+  }
+
+  Future<void> _extractCovers() async {
+    final item = _demoPlaylist[_index];
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Extracting covers...')),
+    );
+    try {
+      final frames = await FlutterCacheVideoPlayer.extractCoverCandidates(
+        VideoSource.network(item.url),
+        count: 5,
+      );
+      if (!mounted) return;
+      messenger.hideCurrentSnackBar();
+      if (frames.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('No covers extracted.')),
+        );
+        return;
+      }
+      showDialog<void>(
+        context: context,
+        builder: (_) => _CoversDialog(frames: frames),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Cover extraction failed: $e')),
+      );
+    }
   }
 
   @override
@@ -211,7 +278,6 @@ class _PlayerPageState extends State<PlayerPage> {
           )
         : DefaultVideoPlayer(
             controller: _controller,
-            aspectRatio: 16 / 9,
             fill: _fullscreen,
             onClose: () {
               if (_fullscreen) {
@@ -365,4 +431,120 @@ class _SpeedRow extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SnapshotDialog extends StatelessWidget {
+  final XFile file;
+  const _SnapshotDialog({required this.file});
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text('Snapshot', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 360),
+              child: _imageFor(file),
+            ),
+            const SizedBox(height: 8),
+            SelectableText(
+              file.path,
+              style: Theme.of(context).textTheme.bodySmall,
+              maxLines: 2,
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => Navigator.of(context).maybePop(),
+                child: const Text('Close'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CoversDialog extends StatelessWidget {
+  final List<VideoCoverFrame> frames;
+  const _CoversDialog({required this.frames});
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'Cover candidates (${frames.length})',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 360),
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: frames.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (context, i) {
+                  final f = frames[i];
+                  return Row(
+                    children: <Widget>[
+                      SizedBox(
+                        width: 100,
+                        height: 56,
+                        child: _imageFor(f.image, fit: BoxFit.cover),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              'Pos: ${f.position.inMilliseconds}ms',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                            Text(
+                              'Brightness: ${f.brightness.toStringAsFixed(3)}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => Navigator.of(context).maybePop(),
+                child: const Text('Close'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Widget _imageFor(XFile file, {BoxFit fit = BoxFit.contain}) {
+  if (kIsWeb) {
+    // On web, path is a data: or blob: URL.
+    return Image.network(file.path, fit: fit);
+  }
+  return Image.file(File(file.path), fit: fit);
 }

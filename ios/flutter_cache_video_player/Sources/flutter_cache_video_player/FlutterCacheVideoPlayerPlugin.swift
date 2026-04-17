@@ -81,6 +81,26 @@ public class FlutterCacheVideoPlayerPlugin: NSObject, FlutterPlugin {
         case "dispose":
             player.dispose()
             result(nil)
+        case "takeSnapshot":
+            player.takeSnapshot(result: result)
+        case "extractCovers":
+            guard let args = call.arguments as? [String: Any],
+                  let url = args["url"] as? String else {
+                result(FlutterError(code: "INVALID_ARG", message: "url is required", details: nil))
+                return
+            }
+            let count = (args["count"] as? Int) ?? 5
+            let candidates = (args["candidates"] as? Int) ?? (count * 3)
+            let minBrightness = (args["minBrightness"] as? Double) ?? 0.08
+            let outputDir = (args["outputDir"] as? String) ?? NSTemporaryDirectory()
+            NativeVideoPlayer.extractCovers(
+                url: url,
+                count: count,
+                candidates: candidates,
+                minBrightness: minBrightness,
+                outputDir: outputDir,
+                result: result
+            )
         case "getPlatformVersion":
             result("iOS " + UIDevice.current.systemVersion)
         default:
@@ -102,6 +122,7 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
     private var timeObserver: Any?
     private var latestPixelBuffer: CVPixelBuffer?
     private var statusObservation: NSKeyValueObservation?
+    private var presentationSizeObservation: NSKeyValueObservation?
     private var didPlayToEndObserver: NSObjectProtocol?
 
     init(textureRegistry: FlutterTextureRegistry) {
@@ -173,6 +194,23 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
             default:
                 break
             }
+        }
+
+        // 上报视频原始尺寸（已包含显示方向修正），供 Flutter 侧计算宽高比。
+        // Report the display-oriented video size so Flutter can pick the
+        // correct aspect ratio (portrait videos are otherwise stretched).
+        let reportSize: (CGSize) -> Void = { [weak self] size in
+            guard size.width > 0 && size.height > 0 else { return }
+            self?.sendEvent(event: "videoSize", value: [
+                "width": Int(size.width),
+                "height": Int(size.height),
+            ])
+        }
+        if playerItem!.presentationSize.width > 0 && playerItem!.presentationSize.height > 0 {
+            reportSize(playerItem!.presentationSize)
+        }
+        presentationSizeObservation = playerItem!.observe(\.presentationSize, options: [.new, .initial]) { item, _ in
+            reportSize(item.presentationSize)
         }
 
         player = AVPlayer(playerItem: playerItem)
@@ -261,6 +299,8 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
 
         statusObservation?.invalidate()
         statusObservation = nil
+        presentationSizeObservation?.invalidate()
+        presentationSizeObservation = nil
 
         player?.pause()
         player = nil
@@ -293,5 +333,150 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
         DispatchQueue.main.async { [weak self] in
             self?.eventSink?(["event": event, "value": value as Any])
         }
+    }
+
+    // MARK: - Snapshot / Covers
+
+    /// 对当前画面截图并返回 PNG Data（通过 result 回调）。
+    /// Snapshot the current frame and return PNG Data via the result callback.
+    func takeSnapshot(result: @escaping FlutterResult) {
+        guard let buffer = latestPixelBuffer else {
+            result(FlutterError(code: "NO_FRAME", message: "No frame available", details: nil))
+            return
+        }
+        if let data = Self.pngData(from: buffer) {
+            result(FlutterStandardTypedData(bytes: data))
+        } else {
+            result(FlutterError(code: "ENCODE_FAIL", message: "Failed to encode PNG", details: nil))
+        }
+    }
+
+    /// 从视频 URL 中抽取若干非黑的候选封面帧。
+    /// Extract non-black cover candidates from a media URL.
+    static func extractCovers(
+        url: String,
+        count: Int,
+        candidates: Int,
+        minBrightness: Double,
+        outputDir: String,
+        result: @escaping FlutterResult
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let mediaURL = URL(string: url) else {
+                DispatchQueue.main.async { result([]) }
+                return
+            }
+            let asset = AVURLAsset(url: mediaURL)
+            let durationSeconds = CMTimeGetSeconds(asset.duration)
+            guard durationSeconds.isFinite, durationSeconds > 0 else {
+                DispatchQueue.main.async { result([]) }
+                return
+            }
+
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: outputDir, withIntermediateDirectories: true, attributes: nil)
+
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+            generator.maximumSize = CGSize(width: 1280, height: 720)
+
+            // Sample times: skip first/last 5%, evenly distribute `candidates` in between.
+            let lower = durationSeconds * 0.05
+            let upper = durationSeconds * 0.95
+            let span = max(upper - lower, 0.1)
+            let n = max(candidates, count)
+            var times: [NSValue] = []
+            for i in 0..<n {
+                let t = lower + span * (Double(i) + 0.5) / Double(n)
+                times.append(NSValue(time: CMTime(seconds: t, preferredTimescale: 600)))
+            }
+
+            var frames: [[String: Any]] = []
+            let group = DispatchGroup()
+            let sync = DispatchQueue(label: "flutter_cache_video_player.covers")
+            for value in times { _ = value; group.enter() }
+
+            generator.generateCGImagesAsynchronously(forTimes: times) { requestedTime, cgImage, _, status, _ in
+                defer { group.leave() }
+                guard status == .succeeded, let cg = cgImage else { return }
+                let brightness = Self.averageBrightness(cgImage: cg)
+                if brightness < minBrightness { return }
+                let ms = Int(CMTimeGetSeconds(requestedTime) * 1000)
+                let name = "cover-\(abs(url.hashValue))-\(ms).png"
+                let outPath = (outputDir as NSString).appendingPathComponent(name)
+                if Self.writePNG(cgImage: cg, to: outPath) {
+                    sync.sync {
+                        frames.append([
+                            "path": outPath,
+                            "positionMs": ms,
+                            "brightness": brightness,
+                        ])
+                    }
+                }
+            }
+
+            group.notify(queue: .main) {
+                // Sort by brightness descending and trim to count.
+                let sorted = frames.sorted { (a, b) -> Bool in
+                    let ab = (a["brightness"] as? Double) ?? 0
+                    let bb = (b["brightness"] as? Double) ?? 0
+                    return ab > bb
+                }
+                let trimmed = Array(sorted.prefix(count))
+                result(trimmed)
+            }
+        }
+    }
+
+    // MARK: - Image helpers
+
+    private static func pngData(from buffer: CVPixelBuffer) -> Data? {
+        let ci = CIImage(cvPixelBuffer: buffer)
+        let ctx = CIContext(options: nil)
+        guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        return UIImage(cgImage: cg).pngData()
+        #else
+        return nil
+        #endif
+    }
+
+    private static func writePNG(cgImage: CGImage, to path: String) -> Bool {
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        guard let data = UIImage(cgImage: cgImage).pngData() else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path))) != nil
+        #else
+        return false
+        #endif
+    }
+
+    private static func averageBrightness(cgImage: CGImage) -> Double {
+        let w = 64
+        let h = 64
+        let bytesPerRow = w * 4
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let ctx = CGContext(
+            data: &data,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return 0 }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var total: Double = 0
+        let pixelCount = w * h
+        for i in 0..<pixelCount {
+            let r = Double(data[i * 4]) / 255.0
+            let g = Double(data[i * 4 + 1]) / 255.0
+            let b = Double(data[i * 4 + 2]) / 255.0
+            total += 0.299 * r + 0.587 * g + 0.114 * b
+        }
+        return total / Double(pixelCount)
     }
 }
