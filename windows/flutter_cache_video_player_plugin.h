@@ -20,9 +20,11 @@
 #include <windows.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "mpv_player.h"
@@ -65,6 +67,18 @@ class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
   HWND message_window_ = nullptr;
   std::atomic<bool> drain_posted_{false};
   std::atomic<bool> render_posted_{false};
+
+  // Dedicated render worker. mpv's SW render is a *heavy* operation (decode +
+  // full-frame RGBA memcpy); running it on the Flutter platform thread blocks
+  // the Dart event loop and causes visible stutter. Keep render off the
+  // platform thread entirely — the platform thread only handles event drain
+  // and MethodChannel calls.
+  std::thread render_thread_;
+  std::mutex render_mutex_;
+  std::condition_variable render_cv_;
+  std::atomic<bool> render_request_{false};
+  std::atomic<bool> render_thread_stop_{false};
+  void RenderLoop();
 
   static LRESULT CALLBACK MessageProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
   static constexpr UINT kMsgDrain = WM_USER + 1;

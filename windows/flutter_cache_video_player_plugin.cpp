@@ -126,24 +126,32 @@ LRESULT CALLBACK FlutterCacheVideoPlayerPlugin::MessageProc(HWND hwnd, UINT msg,
   auto* self = reinterpret_cast<FlutterCacheVideoPlayerPlugin*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (!self) return DefWindowProcW(hwnd, msg, w, l);
   if (msg == kMsgDrain || msg == WM_TIMER) {
-    // Safety-net path for events only: WM_TIMER fires on the platform thread
-    // regardless of whether the cross-thread PostMessageW from mpv's wakeup
-    // callback made it through. We do NOT render here — rendering is still
-    // driven by mpv's update callback via kMsgRender so we don't burn CPU
-    // on every tick.
+    // Cheap: just property-change notifications dispatching into event sink.
     self->drain_posted_.store(false);
     if (self->player_) self->player_->DrainEvents();
     return 0;
   }
-  if (msg == kMsgRender) {
-    self->render_posted_.store(false);
-    if (self->player_ && self->player_->Render()) {
-      if (self->texture_id_ >= 0)
-        self->texture_registrar_->MarkTextureFrameAvailable(self->texture_id_);
-    }
-    return 0;
-  }
   return DefWindowProcW(hwnd, msg, w, l);
+}
+
+void FlutterCacheVideoPlayerPlugin::RenderLoop() {
+  while (!render_thread_stop_.load(std::memory_order_acquire)) {
+    {
+      std::unique_lock<std::mutex> lk(render_mutex_);
+      render_cv_.wait(lk, [this] {
+        return render_request_.load(std::memory_order_acquire) ||
+               render_thread_stop_.load(std::memory_order_acquire);
+      });
+      if (render_thread_stop_.load(std::memory_order_acquire)) return;
+      render_request_.store(false, std::memory_order_release);
+    }
+    // mpv SW render runs on this dedicated worker; MarkTextureFrameAvailable
+    // is documented as thread-safe so it's fine to call from here.
+    if (player_ && player_->Render()) {
+      if (texture_id_ >= 0)
+        texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+    }
+  }
 }
 
 void FlutterCacheVideoPlayerPlugin::EnsurePlayer() {
@@ -160,10 +168,12 @@ void FlutterCacheVideoPlayerPlugin::EnsurePlayer() {
     if (drain_posted_.compare_exchange_strong(expected, true))
       PostMessageW(hwnd, kMsgDrain, 0, 0);
   });
-  p->SetUpdateHandler([this, hwnd]() {
-    bool expected = false;
-    if (render_posted_.compare_exchange_strong(expected, true))
-      PostMessageW(hwnd, kMsgRender, 0, 0);
+  p->SetUpdateHandler([this]() {
+    // Signal the dedicated render worker — do NOT render on the platform
+    // thread. mpv's SW render is heavy enough that running it on the
+    // platform thread starves the Flutter UI.
+    render_request_.store(true, std::memory_order_release);
+    render_cv_.notify_one();
   });
   p->SetOnPosition([this](int64_t ms) { SendEvent("position", flutter::EncodableValue(ms)); });
   p->SetOnDuration([this](int64_t ms) { SendEvent("duration", flutter::EncodableValue(ms)); });
@@ -188,6 +198,11 @@ void FlutterCacheVideoPlayerPlugin::EnsurePlayer() {
     SendEvent("videoSize", flutter::EncodableValue(std::move(size)));
   });
   player_ = std::move(p);
+  // Spin up the dedicated render worker once the player exists.
+  if (!render_thread_.joinable()) {
+    render_thread_stop_.store(false, std::memory_order_release);
+    render_thread_ = std::thread([this]() { RenderLoop(); });
+  }
 }
 
 int64_t FlutterCacheVideoPlayerPlugin::CreateTextureIfNeeded() {
@@ -204,6 +219,12 @@ int64_t FlutterCacheVideoPlayerPlugin::CreateTextureIfNeeded() {
 }
 
 void FlutterCacheVideoPlayerPlugin::DisposePlayer() {
+  // Stop the render worker first so it doesn't touch a half-destroyed player.
+  if (render_thread_.joinable()) {
+    render_thread_stop_.store(true, std::memory_order_release);
+    render_cv_.notify_all();
+    render_thread_.join();
+  }
   if (player_) player_.reset();
   if (texture_id_ >= 0) { texture_registrar_->UnregisterTexture(texture_id_); texture_id_ = -1; }
   texture_variant_.reset();
