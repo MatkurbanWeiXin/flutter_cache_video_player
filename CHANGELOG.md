@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.0.0...v1.1.0) (2026-04-17)
+
+
+### Features
+
+* Add default video player ([7a10716](https://github.com/Matkurban/flutter_cache_video_player/commit/7a10716481d8e7f1ab2493f5adbd3b68742eb644))
+
 ## 1.0.0 (2026-04-15)
 
 
