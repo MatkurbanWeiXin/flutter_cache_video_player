@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.4.0...v1.5.0) (2026-04-18)
+
+
+### Features
+
+* Add `FlutterCacheVideoPlayer.instance.getDuration(VideoSource, {timeout})` — accurately probe total media duration on all six platforms without creating a player texture or starting playback. Network sources are routed through the built-in caching proxy so probed bytes are reused by subsequent `playNetwork` calls. Desktop (libmpv) uses the same `demuxer-lavf-probesize` / `analyzeduration` knobs as the main player so tail-moov MP4s report correctly; iOS / macOS use `AVURLAsset.loadValuesAsynchronously`; Android uses `MediaMetadataRetriever`; Web uses an offscreen `<video preload="metadata">`. Failures / timeouts / live streams return `null` instead of throwing. ([4fde81e](https://github.com/Matkurban/flutter_cache_video_player/commit/4fde81ed49fd638506d2f61cc8f344fca26a1d77))
+
 ## [1.4.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.3.0...v1.4.0) (2026-04-17)
 
 
