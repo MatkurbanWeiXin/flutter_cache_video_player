@@ -111,8 +111,7 @@ class PlayerPage extends StatefulWidget {
 }
 
 class _PlayerPageState extends State<PlayerPage> {
-  final VideoPlayerController _controller =
-      VideoPlayerController();
+  final VideoPlayerController _controller = VideoPlayerController();
   late int _index = widget.initialIndex;
   bool _ready = false;
   bool _fullscreen = false;
