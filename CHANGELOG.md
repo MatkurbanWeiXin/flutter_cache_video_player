@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.5.0...v1.6.0) (2026-04-19)
+
+
+### Features
+
+* 优化示例项目，优化项目结构 ([d29cb9f](https://github.com/Matkurban/flutter_cache_video_player/commit/d29cb9f78cb74015a0942646c42f8b728e2e303f))
+
 ## [1.5.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.4.0...v1.5.0) (2026-04-18)
 
 
