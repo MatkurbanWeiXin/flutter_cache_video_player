@@ -17,3 +17,5 @@ x86/
 !*.[Cc]ache/
 .vs/
 out/
+cmake-build-debug/
+*.aps

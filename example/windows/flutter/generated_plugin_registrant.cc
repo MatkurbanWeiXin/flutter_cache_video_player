@@ -10,8 +10,8 @@
 #include <flutter_cache_video_player/flutter_cache_video_player_plugin_c_api.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
-  ConnectivityPlusWindowsPluginRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("ConnectivityPlusWindowsPlugin"));
-  FlutterCacheVideoPlayerPluginCApiRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("FlutterCacheVideoPlayerPluginCApi"));
+	ConnectivityPlusWindowsPluginRegisterWithRegistrar(
+		registry->GetRegistrarForPlugin("ConnectivityPlusWindowsPlugin"));
+	FlutterCacheVideoPlayerPluginCApiRegisterWithRegistrar(
+		registry->GetRegistrarForPlugin("FlutterCacheVideoPlayerPluginCApi"));
 }

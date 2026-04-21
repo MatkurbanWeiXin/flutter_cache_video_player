@@ -31,59 +31,59 @@
 
 namespace flutter_cache_video_player {
 
-class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
- public:
-  static void RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar);
+	class FlutterCacheVideoPlayerPlugin : public flutter::Plugin {
+	public:
+		static void RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar);
 
-  explicit FlutterCacheVideoPlayerPlugin(flutter::PluginRegistrarWindows* registrar);
-  ~FlutterCacheVideoPlayerPlugin() override;
+		explicit FlutterCacheVideoPlayerPlugin(flutter::PluginRegistrarWindows* registrar);
+		~FlutterCacheVideoPlayerPlugin() override;
 
-  FlutterCacheVideoPlayerPlugin(const FlutterCacheVideoPlayerPlugin&) = delete;
-  FlutterCacheVideoPlayerPlugin& operator=(const FlutterCacheVideoPlayerPlugin&) = delete;
+		FlutterCacheVideoPlayerPlugin(const FlutterCacheVideoPlayerPlugin&) = delete;
+		FlutterCacheVideoPlayerPlugin& operator=(const FlutterCacheVideoPlayerPlugin&) = delete;
 
-  std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
+		std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
 
- private:
-  void HandleMethodCall(const flutter::MethodCall<flutter::EncodableValue>& call,
-                        std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+	private:
+		void HandleMethodCall(const flutter::MethodCall<flutter::EncodableValue>& call,
+			std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
-  void EnsurePlayer();
-  int64_t CreateTextureIfNeeded();
-  void DisposePlayer();
-  void SendEvent(const std::string& name, flutter::EncodableValue value);
+		void EnsurePlayer();
+		int64_t CreateTextureIfNeeded();
+		void DisposePlayer();
+		void SendEvent(const std::string& name, flutter::EncodableValue value);
 
-  flutter::PluginRegistrarWindows* registrar_;
-  flutter::TextureRegistrar* texture_registrar_;
-  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> method_channel_;
-  std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>> event_channel_;
+		flutter::PluginRegistrarWindows* registrar_;
+		flutter::TextureRegistrar* texture_registrar_;
+		std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> method_channel_;
+		std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>> event_channel_;
 
-  std::unique_ptr<MpvPlayer> player_;
-  std::unique_ptr<flutter::TextureVariant> texture_variant_;
-  int64_t texture_id_ = -1;
-  FlutterDesktopPixelBuffer pixel_buffer_{};
-  std::vector<uint8_t> pixel_buffer_data_;
-  std::mutex pixel_mutex_;
+		std::unique_ptr<MpvPlayer> player_;
+		std::unique_ptr<flutter::TextureVariant> texture_variant_;
+		int64_t texture_id_ = -1;
+		FlutterDesktopPixelBuffer pixel_buffer_{};
+		std::vector<uint8_t> pixel_buffer_data_;
+		std::mutex pixel_mutex_;
 
-  HWND message_window_ = nullptr;
-  std::atomic<bool> drain_posted_{false};
-  std::atomic<bool> render_posted_{false};
+		HWND message_window_ = nullptr;
+		std::atomic<bool> drain_posted_{ false };
+		std::atomic<bool> render_posted_{ false };
 
-  // Dedicated render worker. mpv's SW render is a *heavy* operation (decode +
-  // full-frame RGBA memcpy); running it on the Flutter platform thread blocks
-  // the Dart event loop and causes visible stutter. Keep render off the
-  // platform thread entirely — the platform thread only handles event drain
-  // and MethodChannel calls.
-  std::thread render_thread_;
-  std::mutex render_mutex_;
-  std::condition_variable render_cv_;
-  std::atomic<bool> render_request_{false};
-  std::atomic<bool> render_thread_stop_{false};
-  void RenderLoop();
+		// Dedicated render worker. mpv's SW render is a *heavy* operation (decode +
+		// full-frame RGBA memcpy); running it on the Flutter platform thread blocks
+		// the Dart event loop and causes visible stutter. Keep render off the
+		// platform thread entirely — the platform thread only handles event drain
+		// and MethodChannel calls.
+		std::thread render_thread_;
+		std::mutex render_mutex_;
+		std::condition_variable render_cv_;
+		std::atomic<bool> render_request_{ false };
+		std::atomic<bool> render_thread_stop_{ false };
+		void RenderLoop();
 
-  static LRESULT CALLBACK MessageProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
-  static constexpr UINT kMsgDrain = WM_USER + 1;
-  static constexpr UINT kMsgRender = WM_USER + 2;
-};
+		static LRESULT CALLBACK MessageProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
+		static constexpr UINT kMsgDrain = WM_USER + 1;
+		static constexpr UINT kMsgRender = WM_USER + 2;
+	};
 
 }  // namespace flutter_cache_video_player
 
