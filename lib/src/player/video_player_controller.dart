@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_cache_video_player/flutter_cache_video_player.dart';
 import 'package:signals_flutter/signals_flutter.dart';
+
 import 'native_player_controller.dart';
 
 /// 播放控制器，封装 NativePlayerController 并管理生命周期、事件监听和历史持久化。

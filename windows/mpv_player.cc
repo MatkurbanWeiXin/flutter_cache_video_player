@@ -110,21 +110,10 @@ namespace flutter_cache_video_player {
 			return count > 0 ? total / static_cast<double>(count) : 0.0;
 		}
 
-		// Convenience — issue an mpv command synchronously (mpv_command blocks until
-		// the command is fully processed, except for async-only commands).
-		int Cmd(mpv_handle* h, std::initializer_list<const char*> args) {
-			std::vector<const char*> a(args);
-			a.push_back(nullptr);
-			return mpv_command(h, a.data());
-		}
-
 		int SetOptionString(mpv_handle* h, const char* name, const char* value) {
 			return mpv_set_option_string(h, name, value);
 		}
 
-		int SetPropertyString(mpv_handle* h, const char* name, const char* value) {
-			return mpv_set_property_string(h, name, value);
-		}
 
 	}  // namespace
 

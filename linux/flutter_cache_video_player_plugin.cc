@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 
+#include <clocale>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -341,6 +342,13 @@ static FlMethodErrorResponse* event_channel_listen_cb(FlEventChannel*, FlValue*,
 static FlMethodErrorResponse* event_channel_cancel_cb(FlEventChannel*, FlValue*, gpointer) { return nullptr; }
 
 void flutter_cache_video_player_plugin_register_with_registrar(FlPluginRegistrar* registrar) {
+  // libmpv hard-requires LC_NUMERIC=C; otherwise mpv_create() fails outright
+  // ("Non-C locale detected. This is not supported.") and downstream double
+  // parsing of option strings ("50000000" etc.) can corrupt the heap and
+  // abort the process with `corrupted size vs prev_size`. Set it process-wide
+  // before any mpv handle is created.
+  std::setlocale(LC_NUMERIC, "C");
+
   FlutterCacheVideoPlayerPlugin* plugin = FLUTTER_CACHE_VIDEO_PLAYER_PLUGIN(
       g_object_new(flutter_cache_video_player_plugin_get_type(), nullptr));
 

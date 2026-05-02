@@ -197,18 +197,18 @@ enable_testing()
 
 # Add the Google Test dependency.
 include(FetchContent)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+  cmake_policy(SET CMP0135 NEW)
+endif()
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 # Prevent overriding the parent project's compiler/linker settings
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 # Disable install commands for gtest so it doesn't end up in the bundle.
 set(INSTALL_GTEST OFF CACHE BOOL "Disable installation of googletest" FORCE)
-# Allow googletest to configure under CMake 4.x without cmake_minimum_required errors.
-if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
-  cmake_policy(SET CMP0135 NEW)
-endif()
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
 FetchContent_MakeAvailable(googletest)
 unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)

@@ -21,12 +21,6 @@ class ExampleApp extends StatefulWidget {
 
 class _ExampleAppState extends State<ExampleApp> {
   @override
-  void initState() {
-    super.initState();
-    FlutterCacheVideoPlayer.instance.initialize();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Cache Video Player',

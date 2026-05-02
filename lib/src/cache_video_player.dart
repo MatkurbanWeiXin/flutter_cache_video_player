@@ -1,8 +1,9 @@
+import 'package:cross_file/cross_file.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:cross_file/cross_file.dart';
+
 import 'core/constants.dart';
 import 'core/platform_detector.dart';
 import 'core/video_source.dart';
@@ -11,8 +12,8 @@ import 'data/models/video_cover_frame.dart';
 import 'data/repositories/cache_repository.dart';
 import 'data/repositories/history_repository.dart';
 import 'download/download_manager.dart';
-import 'player/platform_player_factory.dart';
 import 'player/native_player_controller.dart';
+import 'player/platform_player_factory.dart';
 import 'proxy/proxy_server.dart';
 import 'utils/file_utils.dart';
 
@@ -28,6 +29,8 @@ class FlutterCacheVideoPlayer {
   factory FlutterCacheVideoPlayer() => _instance;
 
   CacheConfig? _config;
+
+  Future<void>? _initFuture;
 
   late final CacheIndexDB _cacheDB;
 
@@ -70,7 +73,17 @@ class FlutterCacheVideoPlayer {
 
   /// 初始化所有服务层：数据库 → 下载线程池 → 代理服务器 → 播放器。
   /// Initializes all service layers: DB → worker pool → proxy server → player.
-  Future<void> initialize() async {
+  ///
+  /// Idempotent: repeated calls (including concurrent ones) await the same
+  /// in-flight future and never re-run initialization. This prevents
+  /// `LateInitializationError`s on fields like `_cacheDB` when callers (e.g.
+  /// `main()` plus a `State.initState`) accidentally invoke it twice.
+  Future<void> initialize() {
+    if (_initialized) return Future<void>.value();
+    return _initFuture ??= _doInitialize();
+  }
+
+  Future<void> _doInitialize() async {
     WidgetsFlutterBinding.ensureInitialized();
     // Initialize database
     _cacheDB = CacheIndexDB.instance;
@@ -209,5 +222,6 @@ class FlutterCacheVideoPlayer {
     await _downloadManager.dispose();
     await _cacheDB.close();
     _initialized = false;
+    _initFuture = null;
   }
 }

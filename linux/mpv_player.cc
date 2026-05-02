@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -110,21 +111,10 @@ double AverageBrightness(const uint8_t* data,
   return count > 0 ? total / static_cast<double>(count) : 0.0;
 }
 
-// Convenience — issue an mpv command synchronously (mpv_command blocks until
-// the command is fully processed, except for async-only commands).
-int Cmd(mpv_handle* h, std::initializer_list<const char*> args) {
-  std::vector<const char*> a(args);
-  a.push_back(nullptr);
-  return mpv_command(h, a.data());
-}
-
 int SetOptionString(mpv_handle* h, const char* name, const char* value) {
   return mpv_set_option_string(h, name, value);
 }
 
-int SetPropertyString(mpv_handle* h, const char* name, const char* value) {
-  return mpv_set_property_string(h, name, value);
-}
 
 }  // namespace
 
@@ -149,6 +139,11 @@ void MpvPlayer::OnMpvRenderUpdate(void* ctx) {
 }
 
 bool MpvPlayer::Initialize(std::string* error) {
+  // libmpv refuses to start under non-C LC_NUMERIC and will otherwise
+  // misparse option strings (probesize, analyzeduration, …) leading to
+  // heap corruption. Enforce here too in case the host app changed the
+  // locale after plugin registration.
+  std::setlocale(LC_NUMERIC, "C");
   mpv_ = mpv_create();
   if (!mpv_) {
     if (error) *error = "mpv_create failed";
@@ -545,6 +540,7 @@ std::vector<CoverFrame> MpvPlayer::ExtractCovers(const std::string& url,
   if (count <= 0) return result;
   if (candidates < count) candidates = count * 3;
 
+  std::setlocale(LC_NUMERIC, "C");
   mpv_handle* h = mpv_create();
   if (!h) {
     if (error) *error = "mpv_create failed";
@@ -716,6 +712,7 @@ int64_t MpvPlayer::GetDurationMs(const std::string& url,
     return 0;
   }
 
+  std::setlocale(LC_NUMERIC, "C");
   mpv_handle* h = mpv_create();
   if (!h) {
     if (error) *error = "mpv_create failed";
