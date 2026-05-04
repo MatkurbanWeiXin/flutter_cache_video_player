@@ -23,10 +23,12 @@ class DownloadWorkerPool {
   final CacheConfig config;
   final List<_WorkerHandle> _workers = [];
   final latestEvent = signal<WorkerEvent?>(null);
+  final _progressController = StreamController<ChunkProgress>.broadcast(sync: true);
   bool _isReady = false;
 
   DownloadWorkerPool({required this.workerCount, required this.config});
   bool get isReady => _isReady;
+  Stream<ChunkProgress> get progressStream => _progressController.stream;
 
   /// 启动所有 Worker Isolate。
   /// Starts all Worker Isolates.
@@ -91,6 +93,10 @@ class DownloadWorkerPool {
           handle.currentChunkIndex = null;
         }
       }
+    }
+    if (event is ChunkProgress) {
+      _progressController.add(event);
+      return;
     }
     // ChunkProgress 事件量极大（每个网络缓冲区一次），传播到信号链会
     // 引发信号洪泛。仅转发完成/失败/取消/就绪等低频事件。
@@ -170,5 +176,6 @@ class DownloadWorkerPool {
     }
     _workers.clear();
     _isReady = false;
+    await _progressController.close();
   }
 }

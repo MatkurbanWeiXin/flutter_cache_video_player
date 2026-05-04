@@ -12,6 +12,22 @@ import 'download_task.dart';
 import 'download_worker_pool.dart';
 import 'chunk_merger.dart';
 
+int _compareDownloadTasks(DownloadTask a, DownloadTask b) {
+  final cmp = a.priority.index.compareTo(b.priority.index);
+  if (cmp != 0) return cmp;
+  return a.chunkIndex.compareTo(b.chunkIndex);
+}
+
+class _DownloadSession {
+  _DownloadSession({required this.media, required this.bitmap})
+    : taskQueue = SplayTreeSet<DownloadTask>(_compareDownloadTasks);
+
+  MediaIndex media;
+  ChunkBitmap bitmap;
+  final SplayTreeSet<DownloadTask> taskQueue;
+  final Map<int, int> retryCount = <int, int>{};
+}
+
 /// 下载管理器，负责任务调度、优先级队列、重试与合并。
 /// Download manager handling task scheduling, priority queueing, retries, and chunk merging.
 class DownloadManager {
@@ -21,31 +37,36 @@ class DownloadManager {
 
   late final DownloadWorkerPool _pool;
 
-  final _taskQueue = SplayTreeSet<DownloadTask>((a, b) {
-    final cmp = a.priority.index.compareTo(b.priority.index);
-    if (cmp != 0) return cmp;
-    return a.chunkIndex.compareTo(b.chunkIndex);
-  });
-
   void Function()? _eventEffectDisposer;
+  StreamSubscription<ChunkProgress>? _progressSubscription;
+  final _progressController = StreamController<ChunkProgress>.broadcast(sync: true);
 
   String? _currentUrlHash;
-
-  MediaIndex? _currentMedia;
-
-  ChunkBitmap? _currentBitmap;
+  final Map<String, _DownloadSession> _sessions = <String, _DownloadSession>{};
 
   /// 当前正在下载的媒体 URL 哈希，切换视频后会更新。
   /// The URL hash of the currently downloading media; updated on video switch.
   String? get currentUrlHash => _currentUrlHash;
 
+  /// 当前下载会话对应的媒体哈希信号，用于让代理层在切源时快速失效旧等待。
+  /// Signal carrying the currently active download session's media hash so
+  /// proxy waiters can fail fast when playback switches to another source.
+  final activeUrlHash = signal<String?>(null);
+
   final latestCompletion = signal<ChunkCompleted?>(null);
 
   final latestFailure = signal<ChunkFailed?>(null);
 
-  final Map<int, int> _retryCount = {};
+  Stream<ChunkProgress> get progressStream => _progressController.stream;
 
   DownloadManager({required this.config, required this.cacheRepo});
+
+  _DownloadSession? get _activeSession => _sessionFor(_currentUrlHash);
+
+  _DownloadSession? _sessionFor(String? urlHash) {
+    if (urlHash == null) return null;
+    return _sessions[urlHash];
+  }
 
   /// 初始化工作线程池并监听 Worker 事件（Web 平台跳过）。
   /// Initializes the worker pool and subscribes to worker events (skipped on web).
@@ -64,6 +85,11 @@ class DownloadManager {
       if (event == null) return;
       _onWorkerEvent(event);
     });
+    _progressSubscription = _pool.progressStream.listen(_onChunkProgress);
+  }
+
+  void _onChunkProgress(ChunkProgress event) {
+    _progressController.add(event);
   }
 
   void _onWorkerEvent(WorkerEvent event) {
@@ -81,11 +107,12 @@ class DownloadManager {
       case WorkerReady():
         _dispatchNext();
         break;
-      case WorkerCancelled(:final chunkIndex):
+      case WorkerCancelled(:final urlHash, :final chunkIndex):
         // 向 failureSignal 发送事件，以解除 _downloadAndStream 中等待的 Completer。
         // Emit failure so that _downloadAndStream completers are unblocked.
         latestFailure.set(
           ChunkFailed(
+            urlHash: urlHash,
             chunkIndex: chunkIndex,
             errorMessage: 'Download cancelled (media switched)',
             retryable: false,
@@ -99,23 +126,30 @@ class DownloadManager {
 
   Future<void> _onChunkCompleted(ChunkCompleted event) async {
     latestCompletion.set(event, force: true);
-    _retryCount.remove(event.chunkIndex);
+    final session = _sessionFor(event.urlHash);
+    if (session == null) {
+      _dispatchNext();
+      return;
+    }
+    session.retryCount.remove(event.chunkIndex);
 
     // Update bitmap
-    if (_currentBitmap != null && _currentUrlHash != null) {
-      _currentBitmap = _currentBitmap!.setChunkCompleted(event.chunkIndex, event.bytesWritten);
-      await cacheRepo.updateBitmap(_currentBitmap!);
+    session.bitmap = session.bitmap.setChunkCompleted(event.chunkIndex, event.bytesWritten);
+    await cacheRepo.updateBitmap(session.bitmap);
 
-      // Check if all chunks complete
-      if (_currentMedia != null) {
-        final incomplete = _currentBitmap!.getIncompleteChunks(_currentMedia!.totalChunks);
-        if (incomplete.isEmpty) {
-          await cacheRepo.markCompleted(_currentUrlHash!);
+    // Check if all chunks complete
+    final incomplete = session.bitmap.getIncompleteChunks(session.media.totalChunks);
+    if (incomplete.isEmpty) {
+      await cacheRepo.markCompleted(event.urlHash);
+      session.media = session.media.copyWith(
+        isCompleted: true,
+        lastAccessed: DateTime.now().millisecondsSinceEpoch,
+      );
 
-          // Trigger merge
-          _mergeInBackground();
-        }
-      }
+      // Trigger merge
+      _mergeInBackground(session);
+    } else if (event.urlHash == _currentUrlHash) {
+      session.media = session.media.copyWith(lastAccessed: DateTime.now().millisecondsSinceEpoch);
     }
 
     _dispatchNext();
@@ -124,13 +158,19 @@ class DownloadManager {
   void _onChunkFailed(ChunkFailed event) {
     latestFailure.set(event, force: true);
 
+    final session = _sessionFor(event.urlHash);
+    if (session == null) {
+      _dispatchNext();
+      return;
+    }
+
     if (event.retryable) {
-      final count = _retryCount[event.chunkIndex] ?? 0;
+      final count = session.retryCount[event.chunkIndex] ?? 0;
       if (count < config.maxRetryCount) {
-        _retryCount[event.chunkIndex] = count + 1;
+        session.retryCount[event.chunkIndex] = count + 1;
         final delayMs = config.retryBaseDelayMs * (1 << count);
         Future.delayed(Duration(milliseconds: delayMs), () {
-          _resubmitChunk(event.chunkIndex);
+          _resubmitChunk(event.urlHash, event.chunkIndex);
         });
         return;
       }
@@ -138,12 +178,15 @@ class DownloadManager {
     _dispatchNext();
   }
 
-  void _resubmitChunk(int chunkIndex) {
-    if (_currentMedia == null) return;
-    final task = _createTask(chunkIndex, TaskPriority.p0Urgent);
+  void _resubmitChunk(String urlHash, int chunkIndex) {
+    final session = _sessionFor(urlHash);
+    if (session == null) return;
+    final task = _createTask(session, chunkIndex, TaskPriority.p0Urgent);
     if (task != null) {
-      _taskQueue.add(task);
-      _dispatchNext();
+      session.taskQueue.add(task);
+      if (urlHash == _currentUrlHash) {
+        _dispatchNext();
+      }
     }
   }
 
@@ -163,19 +206,27 @@ class DownloadManager {
     latestFailure.value = null;
 
     _currentUrlHash = media.urlHash;
-    _currentMedia = media;
-    _currentBitmap = await cacheRepo.getBitmap(media.urlHash);
-    _taskQueue.clear();
-    _retryCount.clear();
+    activeUrlHash.value = media.urlHash;
+    final bitmap = await cacheRepo.getBitmap(media.urlHash);
+    if (bitmap == null) return;
 
-    if (_currentBitmap == null) return;
+    final session = _sessions.update(media.urlHash, (existing) {
+      existing.media = media;
+      existing.bitmap = bitmap;
+      existing.taskQueue.clear();
+      existing.retryCount.clear();
+      return existing;
+    }, ifAbsent: () => _DownloadSession(media: media, bitmap: bitmap));
+    session.taskQueue.clear();
+    session.retryCount.clear();
+
     if (media.isCompleted) return;
 
     // Queue background fill
-    final incomplete = _currentBitmap!.getIncompleteChunks(media.totalChunks);
+    final incomplete = session.bitmap.getIncompleteChunks(media.totalChunks);
     for (final idx in incomplete) {
-      final task = _createTask(idx, TaskPriority.p3Low);
-      if (task != null) _taskQueue.add(task);
+      final task = _createTask(session, idx, TaskPriority.p3Low);
+      if (task != null) session.taskQueue.add(task);
     }
 
     _dispatchNext();
@@ -184,7 +235,8 @@ class DownloadManager {
   /// 处理 Seek 操作：重建任务队列，优先下载目标分片。
   /// Handles seek: rebuilds the task queue with the target chunk at highest priority.
   void onSeek(int byteOffset) {
-    if (_currentMedia == null || _currentBitmap == null) return;
+    final session = _activeSession;
+    if (session == null) return;
 
     final targetChunk = byteOffset ~/ config.chunkSize;
 
@@ -192,9 +244,9 @@ class DownloadManager {
     _pool.cancelAll();
 
     // Rebuild queue with new priorities
-    _taskQueue.clear();
+    session.taskQueue.clear();
 
-    final incomplete = _currentBitmap!.getIncompleteChunks(_currentMedia!.totalChunks);
+    final incomplete = session.bitmap.getIncompleteChunks(session.media.totalChunks);
 
     for (final idx in incomplete) {
       TaskPriority priority;
@@ -205,8 +257,8 @@ class DownloadManager {
       } else {
         priority = TaskPriority.p3Low;
       }
-      final task = _createTask(idx, priority);
-      if (task != null) _taskQueue.add(task);
+      final task = _createTask(session, idx, priority);
+      if (task != null) session.taskQueue.add(task);
     }
 
     _dispatchNext();
@@ -214,17 +266,20 @@ class DownloadManager {
 
   /// 将指定分片提升为最高优先级。
   /// Promotes the specified chunk to the highest priority.
-  void requestChunkPriority(int chunkIndex) {
-    if (_currentMedia == null || _currentBitmap == null) return;
-    if (_currentBitmap!.isChunkCompleted(chunkIndex)) return;
+  void requestChunkPriority(int chunkIndex, {String? urlHash}) {
+    final targetUrlHash = urlHash ?? _currentUrlHash;
+    if (targetUrlHash == null || targetUrlHash != _currentUrlHash) return;
+    final session = _sessionFor(targetUrlHash);
+    if (session == null) return;
+    if (session.bitmap.isChunkCompleted(chunkIndex)) return;
 
     // Check if already being downloaded
     if (_pool.activeChunkIndices.contains(chunkIndex)) return;
 
     // Add as P0
-    final task = _createTask(chunkIndex, TaskPriority.p0Urgent);
+    final task = _createTask(session, chunkIndex, TaskPriority.p0Urgent);
     if (task != null) {
-      _taskQueue.add(task);
+      session.taskQueue.add(task);
       _dispatchNext();
     }
   }
@@ -233,36 +288,38 @@ class DownloadManager {
   /// 用于处理 DB 位图与磁盘文件不一致的情况（如 chunk 文件被删但位图仍标记完成）。
   /// Invalidates a chunk whose bitmap says "complete" but whose file is missing,
   /// resets the bitmap bit, and queues an urgent re-download.
-  Future<void> invalidateAndDownloadChunk(int chunkIndex) async {
-    if (_currentMedia == null || _currentBitmap == null) return;
+  Future<void> invalidateAndDownloadChunk(int chunkIndex, {String? urlHash}) async {
+    final targetUrlHash = urlHash ?? _currentUrlHash;
+    if (targetUrlHash == null || targetUrlHash != _currentUrlHash) return;
+    final session = _sessionFor(targetUrlHash);
+    if (session == null) return;
 
     // 重置该分片在位图中的完成标记。
     // Clear the completion bit for this chunk.
-    final newBitmap = Uint8List.fromList(_currentBitmap!.bitmap);
+    final newBitmap = Uint8List.fromList(session.bitmap.bitmap);
     final byteIndex = chunkIndex ~/ 8;
     final bitIndex = chunkIndex % 8;
     if (byteIndex < newBitmap.length) {
       newBitmap[byteIndex] &= ~(1 << bitIndex);
     }
-    _currentBitmap = ChunkBitmap(
-      urlHash: _currentBitmap!.urlHash,
+    session.bitmap = ChunkBitmap(
+      urlHash: session.bitmap.urlHash,
       bitmap: newBitmap,
-      downloadedBytes: _currentBitmap!.downloadedBytes,
+      downloadedBytes: session.bitmap.downloadedBytes,
     );
-    await cacheRepo.updateBitmap(_currentBitmap!);
+    await cacheRepo.updateBitmap(session.bitmap);
 
     // 跳过 activeChunkIndices 检查——该分片可能不在下载中。
     // Skip activeChunkIndices check — this chunk is almost certainly not active.
-    final task = _createTask(chunkIndex, TaskPriority.p0Urgent);
+    final task = _createTask(session, chunkIndex, TaskPriority.p0Urgent);
     if (task != null) {
-      _taskQueue.add(task);
+      session.taskQueue.add(task);
       _dispatchNext();
     }
   }
 
-  DownloadTask? _createTask(int chunkIndex, TaskPriority priority) {
-    if (_currentMedia == null) return null;
-    final media = _currentMedia!;
+  DownloadTask? _createTask(_DownloadSession session, int chunkIndex, TaskPriority priority) {
+    final media = session.media;
     final byteStart = chunkIndex * config.chunkSize;
     var byteEnd = byteStart + config.chunkSize - 1;
     if (byteEnd >= media.totalBytes) byteEnd = media.totalBytes - 1;
@@ -279,12 +336,15 @@ class DownloadManager {
   }
 
   void _dispatchNext() {
-    while (_pool.hasAvailableWorker && _taskQueue.isNotEmpty) {
-      final task = _taskQueue.first;
-      _taskQueue.remove(task);
+    final session = _activeSession;
+    if (session == null) return;
+
+    while (_pool.hasAvailableWorker && session.taskQueue.isNotEmpty) {
+      final task = session.taskQueue.first;
+      session.taskQueue.remove(task);
 
       // Skip already completed
-      if (_currentBitmap != null && _currentBitmap!.isChunkCompleted(task.chunkIndex)) {
+      if (session.bitmap.isChunkCompleted(task.chunkIndex)) {
         continue;
       }
       // Skip already in progress
@@ -296,12 +356,11 @@ class DownloadManager {
     }
   }
 
-  Future<void> _mergeInBackground() async {
-    if (_currentMedia == null) return;
+  Future<void> _mergeInBackground(_DownloadSession session) async {
     try {
       await ChunkMerger.mergeChunks(
-        mediaDir: _currentMedia!.localDir,
-        totalChunks: _currentMedia!.totalChunks,
+        mediaDir: session.media.localDir,
+        totalChunks: session.media.totalChunks,
       );
     } catch (_) {}
   }
@@ -310,22 +369,33 @@ class DownloadManager {
   /// Cancels all active downloads and clears the task queue.
   void cancelAll() {
     _pool.cancelAll();
-    _taskQueue.clear();
+    for (final session in _sessions.values) {
+      session.taskQueue.clear();
+      session.retryCount.clear();
+    }
   }
 
   /// 检查指定分片是否已下载完成。
   /// Checks whether the specified chunk has been downloaded.
-  bool isChunkReady(int chunkIndex) {
-    return _currentBitmap?.isChunkCompleted(chunkIndex) ?? false;
+  bool isChunkReady(int chunkIndex, {String? urlHash}) {
+    final session = _sessionFor(urlHash ?? _currentUrlHash);
+    return session?.bitmap.isChunkCompleted(chunkIndex) ?? false;
   }
 
-  ChunkBitmap? get currentBitmap => _currentBitmap;
+  bool isActiveMedia(String urlHash) => _currentUrlHash == urlHash;
+
+  ChunkBitmap? get currentBitmap => _activeSession?.bitmap;
 
   /// 释放资源，关闭工作池和所有事件流。
   /// Disposes resources, shutting down the pool and all event streams.
   Future<void> dispose() async {
     cancelAll();
     _eventEffectDisposer?.call();
+    await _progressSubscription?.cancel();
+    await _progressController.close();
+    activeUrlHash.value = null;
+    _currentUrlHash = null;
+    _sessions.clear();
     await _pool.shutdown();
   }
 }

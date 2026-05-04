@@ -136,8 +136,8 @@ class FlutterCacheVideoPlayerPlugin :
         exoPlayer?.let { player ->
             val mediaItem = MediaItem.fromUri(url)
             player.setMediaItem(mediaItem)
+            player.playWhenReady = false
             player.prepare()
-            player.playWhenReady = true
         }
         result.success(null)
     }

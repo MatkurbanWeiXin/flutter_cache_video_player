@@ -35,14 +35,32 @@ static gboolean video_texture_copy_pixels_cb(FlPixelBufferTexture* tex,
                                              const uint8_t** out_buffer,
                                              uint32_t* width, uint32_t* height,
                                              GError** /*error*/) {
+  // 1x1 全黑 RGBA 占位帧。Flutter Linux 引擎在 copy_pixels 返回 FALSE 时
+  // 仍会沿着 GL 纹理上传路径继续走，命中空指针解引用并 SIGSEGV
+  // （在 fl_engine_gl_external_texture_frame_callback 中）。在第一帧真实
+  // 像素到达前返回这帧占位，保证 GL 上传永远成功；真实帧抵达后会立刻覆盖。
+  //
+  // 1x1 opaque-black RGBA placeholder. Flutter's Linux embedder dereferences
+  // an uninitialised GL texture when copy_pixels returns FALSE, which crashes
+  // the raster thread inside fl_engine_gl_external_texture_frame_callback as
+  // soon as the Texture widget is mounted but before mpv has produced its
+  // first frame. Returning this placeholder keeps the GL upload path valid;
+  // the real frame replaces it the instant decoding starts.
+  static const uint8_t kPlaceholderPixel[4] = {0x00, 0x00, 0x00, 0xFF};
+
   VideoTexture* self = VIDEO_TEXTURE(tex);
   g_mutex_lock(&self->mutex);
-  *out_buffer = self->buffer;
-  *width = self->width;
-  *height = self->height;
-  gboolean ok = self->buffer != nullptr;
+  if (self->buffer != nullptr && self->width > 0 && self->height > 0) {
+    *out_buffer = self->buffer;
+    *width = self->width;
+    *height = self->height;
+  } else {
+    *out_buffer = kPlaceholderPixel;
+    *width = 1;
+    *height = 1;
+  }
   g_mutex_unlock(&self->mutex);
-  return ok;
+  return TRUE;
 }
 
 static void video_texture_dispose(GObject* obj) {
@@ -96,6 +114,7 @@ struct _FlutterCacheVideoPlayerPlugin {
   int64_t texture_id;
   MpvPlayer* player;
   guint drain_source_id;
+  guint drain_timer_id;
   guint render_source_id;
 };
 
@@ -118,6 +137,12 @@ static gboolean drain_events_cb(gpointer user_data) {
   self->drain_source_id = 0;
   if (self->player) self->player->DrainEvents();
   return G_SOURCE_REMOVE;
+}
+
+static gboolean drain_events_timer_cb(gpointer user_data) {
+  auto* self = static_cast<FlutterCacheVideoPlayerPlugin*>(user_data);
+  if (self->player) self->player->DrainEvents();
+  return G_SOURCE_CONTINUE;
 }
 
 static gboolean render_cb(gpointer user_data) {
@@ -162,6 +187,9 @@ static void ensure_player(FlutterCacheVideoPlayerPlugin* self) {
     send_event(self, "videoSize", map);
   });
   self->player = player;
+  if (!self->drain_timer_id) {
+    self->drain_timer_id = g_timeout_add(100, drain_events_timer_cb, self);
+  }
 }
 
 static int64_t player_create(FlutterCacheVideoPlayerPlugin* self) {
@@ -176,6 +204,7 @@ static int64_t player_create(FlutterCacheVideoPlayerPlugin* self) {
 
 static void player_dispose(FlutterCacheVideoPlayerPlugin* self) {
   if (self->drain_source_id) { g_source_remove(self->drain_source_id); self->drain_source_id = 0; }
+  if (self->drain_timer_id) { g_source_remove(self->drain_timer_id); self->drain_timer_id = 0; }
   if (self->render_source_id) { g_source_remove(self->render_source_id); self->render_source_id = 0; }
   if (self->player) { delete self->player; self->player = nullptr; }
   if (self->texture) {
@@ -331,6 +360,7 @@ static void flutter_cache_video_player_plugin_init(FlutterCacheVideoPlayerPlugin
   self->texture_id = -1;
   self->player = nullptr;
   self->drain_source_id = 0;
+  self->drain_timer_id = 0;
   self->render_source_id = 0;
 }
 

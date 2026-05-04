@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 /// 支持播放进度、缓存进度以及拖动时的"小白点"滑块。
 ///
 /// Ultra-thin scrubber used at the bottom of the player.
-/// Renders a playback progress bar, an optional buffered (cached) overlay,
+/// Renders a playback progress bar, an optional cached-progress overlay,
 /// and a tiny white thumb that scales up while the user is scrubbing.
 class PlayerScrubberSlider extends StatefulWidget {
   /// 当前播放进度（0.0 – 1.0）。
@@ -12,7 +12,7 @@ class PlayerScrubberSlider extends StatefulWidget {
   final double value;
 
   /// 已缓存进度（0.0 – 1.0）。小于 [value] 时会被抬升到 [value]。
-  /// Buffered / cached progress (0.0 – 1.0). Clamped to be ≥ [value].
+  /// Cached progress (0.0 – 1.0). Clamped to be ≥ [value].
   final double bufferedValue;
 
   /// 滑动过程中的实时回调（尚未提交）。

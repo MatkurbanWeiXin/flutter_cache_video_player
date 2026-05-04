@@ -38,7 +38,7 @@ class VideoPlayerSlotContext {
 /// Drop-in default video player. Renders the native video frame via
 /// [FlutterCacheVideoPlayerView] and overlays a polished, iOS-style control
 /// surface: a top bar with "done" + more, center transport controls, and a
-/// thin bottom scrubber with buffered progress. Tapping the frame fades the
+/// thin bottom scrubber with cached progress. Tapping the frame fades the
 /// controls in/out and they auto-hide during playback.
 class VideoPlayer extends StatefulWidget {
   /// 底层播放控制器。
@@ -72,13 +72,16 @@ class VideoPlayer extends StatefulWidget {
   final bool initiallyVisible;
 
   /// 外部提供的已缓存进度（0.0 – 1.0），用于覆盖默认的插件内置进度。
-  /// 不提供时，进度条会自动使用 [VideoPlayerController.bufferedProgress]
+  /// 不提供时，进度条会自动使用 [VideoPlayerController.cachedProgress]
   /// （由插件的缓存位图驱动）。
   ///
   /// Optional override for the cached-progress signal. When omitted the
   /// scrubber automatically reflects
-  /// [VideoPlayerController.bufferedProgress], which the plugin
+  /// [VideoPlayerController.cachedProgress], which the plugin
   /// drives from the download bitmap in its cache repository.
+  final ValueListenable<double>? cachedProgress;
+
+  @Deprecated('Use cachedProgress to override the cache/download progress UI.')
   final ValueListenable<double>? bufferedProgress;
 
   /// 视觉样式。
@@ -130,6 +133,7 @@ class VideoPlayer extends StatefulWidget {
     this.autoHideDelay = const Duration(seconds: 3),
     this.fadeDuration = const Duration(milliseconds: 240),
     this.initiallyVisible = true,
+    this.cachedProgress,
     this.bufferedProgress,
     this.style = const VideoPlayerStyle(),
     this.onClose,
@@ -307,8 +311,10 @@ class _VideoPlayerState extends State<VideoPlayer> {
                     widget.bottomScrubberBuilder?.call(context, slot) ??
                     _DefaultBottomScrubber(
                       slot: slot,
-                      bufferedProgress:
-                          widget.bufferedProgress ?? widget.controller.bufferedProgress,
+                      cachedProgress:
+                          widget.cachedProgress ??
+                          widget.bufferedProgress ??
+                          widget.controller.cachedProgress,
                       onInteractStart: () => _hideTimer?.cancel(),
                       onInteractEnd: _scheduleAutoHide,
                     ),
@@ -344,12 +350,28 @@ class _VideoPlayerState extends State<VideoPlayer> {
     // Resolve the effective aspect ratio: explicit value > native reported
     // video ratio > 16:9 placeholder. `watch` keeps this reactive so the
     // layout updates once the native player publishes the real size.
+    //
+    // When the caller didn't pass an explicit ratio we additionally clamp
+    // the outer box to be at least 16:9 wide. Otherwise a portrait video
+    // (e.g. 9:16 ≈ 0.56) makes AspectRatio request `width × width*16/9`,
+    // which on tall layouts (Column with no fixed height) overflows the
+    // parent and pushes following widgets off-screen. Clamping to ≥ 16:9
+    // keeps the inline player behaving like YouTube/Bilibili: a landscape
+    // "stage" with portrait videos letterboxed inside it. The inner
+    // `CorePlayer` keeps using the real video ratio so the frame is never
+    // stretched. Use `fill: true` (e.g. fullscreen) when you want the
+    // portrait video to occupy the whole viewport.
     final double effectiveAspectRatio;
     if (widget.aspectRatio != null) {
       effectiveAspectRatio = widget.aspectRatio!;
     } else {
       final reported = widget.controller.videoAspectRatio.watch(context);
-      effectiveAspectRatio = (reported != null && reported > 0) ? reported : 16 / 9;
+      const double minInlineAspect = 16 / 9;
+      if (reported != null && reported > 0) {
+        effectiveAspectRatio = reported >= minInlineAspect ? reported : minInlineAspect;
+      } else {
+        effectiveAspectRatio = minInlineAspect;
+      }
     }
     return AspectRatio(aspectRatio: effectiveAspectRatio, child: stack);
   }
@@ -551,13 +573,13 @@ class _DefaultCenterControls extends StatelessWidget {
 
 class _DefaultBottomScrubber extends StatefulWidget {
   final VideoPlayerSlotContext slot;
-  final ValueListenable<double>? bufferedProgress;
+  final ValueListenable<double>? cachedProgress;
   final VoidCallback onInteractStart;
   final VoidCallback onInteractEnd;
 
   const _DefaultBottomScrubber({
     required this.slot,
-    required this.bufferedProgress,
+    required this.cachedProgress,
     required this.onInteractStart,
     required this.onInteractEnd,
   });
@@ -605,7 +627,7 @@ class _DefaultBottomScrubberState extends State<_DefaultBottomScrubber> {
 
           final scrubber = _BufferedScrubber(
             value: effectiveValue,
-            bufferedProgress: widget.bufferedProgress,
+            cachedProgress: widget.cachedProgress,
             activeColor: style.scrubberActiveColor,
             bufferedColor: style.scrubberBufferedColor,
             inactiveColor: style.scrubberInactiveColor,
@@ -650,7 +672,7 @@ class _DefaultBottomScrubberState extends State<_DefaultBottomScrubber> {
 /// progress [ValueListenable].
 class _BufferedScrubber extends StatelessWidget {
   final double value;
-  final ValueListenable<double>? bufferedProgress;
+  final ValueListenable<double>? cachedProgress;
   final Color activeColor;
   final Color bufferedColor;
   final Color inactiveColor;
@@ -664,7 +686,7 @@ class _BufferedScrubber extends StatelessWidget {
 
   const _BufferedScrubber({
     required this.value,
-    required this.bufferedProgress,
+    required this.cachedProgress,
     required this.activeColor,
     required this.bufferedColor,
     required this.inactiveColor,
@@ -679,7 +701,7 @@ class _BufferedScrubber extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final listenable = bufferedProgress;
+    final listenable = cachedProgress;
     if (listenable == null) {
       return PlayerScrubberSlider(
         value: value,
@@ -698,10 +720,10 @@ class _BufferedScrubber extends StatelessWidget {
     }
     return ValueListenableBuilder<double>(
       valueListenable: listenable,
-      builder: (context, buffered, _) {
+      builder: (context, cached, _) {
         return PlayerScrubberSlider(
           value: value,
-          bufferedValue: buffered,
+          bufferedValue: cached,
           activeColor: activeColor,
           bufferedColor: bufferedColor,
           inactiveColor: inactiveColor,

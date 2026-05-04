@@ -198,7 +198,7 @@ cmake -DMPV_DOWNLOAD_URL=https://example.com/mpv-dev.7z ^
 
 ## 工作原理
 
-1. **请求** — 调用 `open(url)` 时，代理服务器开始从 `http://127.0.0.1:{port}` 提供媒体
+1. **请求** — 调用 `playXXX(url)` 或 `openXXX(url)` 时，代理服务器开始从 `http://127.0.0.1:{port}` 提供媒体
 2. **下载** — 下载管理器创建分块队列，按优先级将任务分发到 Isolate 工作线程池
 3. **缓存** — 每个下载完成的块保存为独立文件；Bitmap 追踪哪些块已可用
 4. **服务** — 代理服务器从磁盘读取已缓存的块并流式传输给原生播放器；如果某块缺失，会等待下载完成
@@ -224,8 +224,7 @@ void initState() {
   super.initState();
   () async {
     await controller.initialize();
-    await controller.open('https://example.com/video.mp4');
-    await controller.play();
+    await controller.playNetwork('https://example.com/video.mp4');
   }();
 }
 
@@ -278,8 +277,7 @@ void initState() {
   super.initState();
   () async {
     await controller.initialize();
-    await controller.open('https://example.com/video.mp4');
-    await controller.play();
+    await controller.playNetwork('https://example.com/video.mp4');
   }();
 }
 
@@ -344,6 +342,10 @@ Widget build(BuildContext context) {
 // 1) 网络视频 —— 走内建 HTTP 代理和分块缓存。
 await controller.playNetwork('https://example.com/video.mp4');
 
+// 只打开，ready 后保持暂停，之后再手动播放。
+await controller.openNetwork('https://example.com/video.mp4');
+await controller.play();
+
 // 2) 本地文件 —— 绝对路径或 file:// URI。不走代理，不缓存。
 await controller.playFile('/absolute/path/to/movie.mp4');
 
@@ -354,7 +356,7 @@ await controller.playAsset('assets/videos/intro.mp4');
 await controller.playSource(VideoSource.network('https://...'));
 ```
 
-旧版 `controller.open(url)` 仍然保留，等价于 `playNetwork(url)`，便于平滑迁移。
+现在推荐使用成对的 API：`playNetwork/openNetwork`、`playFile/openFile`、`playAsset/openAsset`、`playSource/openSource`。
 
 使用 `playAsset` 时需要在应用的 `pubspec.yaml` 中声明资源：
 

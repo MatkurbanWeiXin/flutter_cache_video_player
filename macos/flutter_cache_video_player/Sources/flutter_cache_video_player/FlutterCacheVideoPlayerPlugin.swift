@@ -282,7 +282,6 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
         }
 
         player = AVPlayer(playerItem: playerItem)
-        player?.play()
 
         let interval = CMTime(value: 1, timescale: 5)
         timeObserver = player?.addPeriodicTimeObserver(
@@ -304,7 +303,7 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
         // Use Timer for frame updates on macOS (simpler than CVDisplayLink)
         startFrameTimer()
 
-        sendEvent(event: "playing", value: true)
+        sendEvent(event: "playing", value: false)
         sendEvent(event: "buffering", value: true)
     }
 

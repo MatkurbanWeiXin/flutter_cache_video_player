@@ -1,0 +1,337 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter_cache_video_player/src/core/constants.dart';
+import 'package:flutter_cache_video_player/src/data/cache_index_db.dart';
+import 'package:flutter_cache_video_player/src/data/models/media_index.dart';
+import 'package:flutter_cache_video_player/src/data/repositories/cache_repository.dart';
+import 'package:flutter_cache_video_player/src/download/download_manager.dart';
+import 'package:flutter_cache_video_player/src/proxy/proxy_server.dart';
+import 'package:flutter_cache_video_player/src/utils/url_hasher.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  group('ProxyCacheServer', () {
+    late final _ProxyTestHarness harness;
+    late final List<int> slowPayload;
+
+    setUpAll(() async {
+      slowPayload = List<int>.generate(64 * 1024, (index) => index % 251);
+      harness = await _ProxyTestHarness.create(
+        config: CacheConfig(
+          chunkSize: slowPayload.length,
+          desktopWorkerCount: 1,
+          mobileWorkerCount: 1,
+          prefetchCount: 1,
+        ),
+        assets: <String, _FixtureAsset>{
+          '/slow.mp4': _FixtureAsset(
+            bytes: slowPayload,
+            splitAfter: slowPayload.length ~/ 2,
+            firstDelay: const Duration(milliseconds: 120),
+            secondDelay: const Duration(milliseconds: 250),
+          ),
+          '/a.mp4': _FixtureAsset(bytes: ascii.encode('ABCDEFGH')),
+          '/b.mp4': _FixtureAsset(bytes: ascii.encode('IJKLMNOP')),
+        },
+      );
+    });
+
+    tearDownAll(() async {
+      await harness.dispose();
+    });
+
+    test('streams range bytes before the chunk download fully completes', () async {
+      final url = harness.fixture.urlFor('/slow.mp4').toString();
+      final media = await harness.seedMedia(url, totalBytes: slowPayload.length);
+
+      await harness.manager.startDownload(url, media);
+
+      final result = await harness.fetchProxy(url, range: 'bytes=0-${slowPayload.length - 1}');
+
+      expect(result.statusCode, HttpStatus.partialContent);
+      expect(result.bytes, slowPayload);
+      expect(result.firstChunkMs, lessThan(300));
+      expect(result.totalMs, greaterThan(result.firstChunkMs + 100));
+    });
+
+    test(
+      'retains chunk readiness for previous media sessions after switching active media',
+      () async {
+        final urlA = harness.fixture.urlFor('/a.mp4').toString();
+        final urlB = harness.fixture.urlFor('/b.mp4').toString();
+        final mediaA = await harness.seedMedia(urlA, totalBytes: 8);
+        final mediaB = await harness.seedMedia(urlB, totalBytes: 8);
+
+        await harness.manager.startDownload(urlA, mediaA);
+        await harness.waitUntil(() => harness.manager.isChunkReady(0, urlHash: mediaA.urlHash));
+
+        expect(harness.manager.isChunkReady(0, urlHash: mediaA.urlHash), isTrue);
+
+        await harness.manager.startDownload(urlB, mediaB);
+
+        expect(harness.manager.currentUrlHash, mediaB.urlHash);
+        expect(harness.manager.isChunkReady(0, urlHash: mediaA.urlHash), isTrue);
+
+        await harness.waitUntil(() => harness.manager.isChunkReady(0, urlHash: mediaB.urlHash));
+
+        expect(harness.manager.isChunkReady(0, urlHash: mediaB.urlHash), isTrue);
+      },
+    );
+  });
+}
+
+class _ProxyTestHarness {
+  _ProxyTestHarness({
+    required this.tempDir,
+    required this.fixture,
+    required this.cacheDb,
+    required this.cacheRepo,
+    required this.manager,
+    required this.proxy,
+  });
+
+  final Directory tempDir;
+  final _OriginFixture fixture;
+  final CacheIndexDB cacheDb;
+  final CacheRepository cacheRepo;
+  final DownloadManager manager;
+  final ProxyCacheServer proxy;
+
+  static Future<_ProxyTestHarness> create({
+    required CacheConfig config,
+    required Map<String, _FixtureAsset> assets,
+  }) async {
+    final tempDir = await Directory.systemTemp.createTemp('fcvp-proxy-test-');
+    final fixture = await _OriginFixture.start(assets);
+    final cacheDb = CacheIndexDB.instance;
+    await cacheDb.initDatabase(dbPath: tempDir.path);
+    final cacheRepo = CacheRepository(cacheDb, config);
+    final manager = DownloadManager(config: config, cacheRepo: cacheRepo);
+    await manager.init();
+    final proxy = ProxyCacheServer(config: config, cacheRepo: cacheRepo, downloadManager: manager);
+    await proxy.start();
+    return _ProxyTestHarness(
+      tempDir: tempDir,
+      fixture: fixture,
+      cacheDb: cacheDb,
+      cacheRepo: cacheRepo,
+      manager: manager,
+      proxy: proxy,
+    );
+  }
+
+  Future<MediaIndex> seedMedia(
+    String url, {
+    required int totalBytes,
+    String mimeType = 'video/mp4',
+  }) async {
+    final urlHash = UrlHasher.hash(url);
+    final existing = await cacheRepo.findByHash(urlHash);
+    if (existing != null) {
+      return existing;
+    }
+
+    final localDir = Directory('${tempDir.path}/$urlHash');
+    await localDir.create(recursive: true);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final totalChunks = (totalBytes + manager.config.chunkSize - 1) ~/ manager.config.chunkSize;
+    final media = MediaIndex(
+      urlHash: urlHash,
+      originalUrl: url,
+      localDir: localDir.path,
+      totalBytes: totalBytes,
+      mimeType: mimeType,
+      createdAt: now,
+      lastAccessed: now,
+      totalChunks: totalChunks,
+    );
+    await cacheRepo.createMediaIndex(media);
+    return media;
+  }
+
+  Future<_ProxyFetchResult> fetchProxy(String originalUrl, {String? range}) async {
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(Uri.parse(proxy.proxyUrl(originalUrl)));
+      if (range != null) {
+        request.headers.set(HttpHeaders.rangeHeader, range);
+      }
+
+      final stopwatch = Stopwatch()..start();
+      final response = await request.close();
+      final bytes = BytesBuilder(copy: false);
+      final bodyCompleter = Completer<List<int>>();
+      int? firstChunkMs;
+
+      response.listen(
+        (chunk) {
+          firstChunkMs ??= stopwatch.elapsedMilliseconds;
+          bytes.add(chunk);
+        },
+        onError: bodyCompleter.completeError,
+        onDone: () => bodyCompleter.complete(bytes.takeBytes()),
+        cancelOnError: true,
+      );
+
+      final body = await bodyCompleter.future;
+      return _ProxyFetchResult(
+        statusCode: response.statusCode,
+        bytes: body,
+        firstChunkMs: firstChunkMs ?? stopwatch.elapsedMilliseconds,
+        totalMs: stopwatch.elapsedMilliseconds,
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> waitUntil(
+    FutureOr<bool> Function() predicate, {
+    Duration timeout = const Duration(seconds: 5),
+    Duration pollInterval = const Duration(milliseconds: 20),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (await predicate()) {
+        return;
+      }
+      await Future<void>.delayed(pollInterval);
+    }
+    fail('Condition not met within $timeout');
+  }
+
+  Future<void> dispose() async {
+    await proxy.stop();
+    await manager.dispose();
+    await cacheDb.close();
+    await fixture.close();
+    if (await tempDir.exists()) {
+      await tempDir.delete(recursive: true);
+    }
+  }
+}
+
+class _ProxyFetchResult {
+  const _ProxyFetchResult({
+    required this.statusCode,
+    required this.bytes,
+    required this.firstChunkMs,
+    required this.totalMs,
+  });
+
+  final int statusCode;
+  final List<int> bytes;
+  final int firstChunkMs;
+  final int totalMs;
+}
+
+class _FixtureAsset {
+  const _FixtureAsset({
+    required this.bytes,
+    this.splitAfter,
+    this.firstDelay = Duration.zero,
+    this.secondDelay = Duration.zero,
+  });
+
+  final List<int> bytes;
+  final int? splitAfter;
+  final Duration firstDelay;
+  final Duration secondDelay;
+}
+
+class _OriginFixture {
+  _OriginFixture._(this._server, this._assets);
+
+  final HttpServer _server;
+  final Map<String, _FixtureAsset> _assets;
+
+  static Future<_OriginFixture> start(Map<String, _FixtureAsset> assets) async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final fixture = _OriginFixture._(server, assets);
+    server.listen(fixture._handleRequest);
+    return fixture;
+  }
+
+  Uri urlFor(String path) => Uri.parse('http://127.0.0.1:${_server.port}$path');
+
+  Future<void> close() async {
+    await _server.close(force: true);
+  }
+
+  Future<void> _handleRequest(HttpRequest request) async {
+    final asset = _assets[request.uri.path];
+    if (asset == null) {
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+      return;
+    }
+
+    final slice = _sliceBytes(asset.bytes, request.headers.value(HttpHeaders.rangeHeader));
+    final isPartial = slice.start != 0 || slice.end != asset.bytes.length - 1;
+
+    request.response.statusCode = isPartial ? HttpStatus.partialContent : HttpStatus.ok;
+    request.response.headers.contentType = ContentType('video', 'mp4');
+    request.response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+    request.response.headers.contentLength = slice.bytes.length;
+    if (isPartial) {
+      request.response.headers.set(
+        HttpHeaders.contentRangeHeader,
+        'bytes ${slice.start}-${slice.end}/${asset.bytes.length}',
+      );
+    }
+
+    if (request.method == 'HEAD') {
+      await request.response.close();
+      return;
+    }
+
+    request.response.bufferOutput = false;
+    final splitAfter = asset.splitAfter == null
+        ? null
+        : asset.splitAfter!.clamp(0, slice.bytes.length);
+    if (splitAfter != null && splitAfter > 0 && splitAfter < slice.bytes.length) {
+      if (asset.firstDelay > Duration.zero) {
+        await Future<void>.delayed(asset.firstDelay);
+      }
+      request.response.add(slice.bytes.sublist(0, splitAfter));
+      await request.response.flush();
+      if (asset.secondDelay > Duration.zero) {
+        await Future<void>.delayed(asset.secondDelay);
+      }
+      request.response.add(slice.bytes.sublist(splitAfter));
+    } else {
+      if (asset.firstDelay > Duration.zero) {
+        await Future<void>.delayed(asset.firstDelay);
+      }
+      request.response.add(slice.bytes);
+    }
+    await request.response.close();
+  }
+
+  _RangeSlice _sliceBytes(List<int> source, String? rangeHeader) {
+    if (rangeHeader == null || rangeHeader.isEmpty) {
+      return _RangeSlice(start: 0, end: source.length - 1, bytes: List<int>.from(source));
+    }
+
+    final match = RegExp(r'bytes=(\d+)-(\d+)?').firstMatch(rangeHeader);
+    if (match == null) {
+      return _RangeSlice(start: 0, end: source.length - 1, bytes: List<int>.from(source));
+    }
+
+    final start = int.parse(match.group(1)!);
+    final end = match.group(2) == null ? source.length - 1 : int.parse(match.group(2)!);
+    final safeEnd = end.clamp(start, source.length - 1);
+    return _RangeSlice(start: start, end: safeEnd, bytes: source.sublist(start, safeEnd + 1));
+  }
+}
+
+class _RangeSlice {
+  const _RangeSlice({required this.start, required this.end, required this.bytes});
+
+  final int start;
+  final int end;
+  final List<int> bytes;
+}

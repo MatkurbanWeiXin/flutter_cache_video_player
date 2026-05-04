@@ -53,6 +53,7 @@ class DownloadWorkerEntry {
     CancelToken cancelToken,
   ) async {
     final url = task['url'] as String;
+    final urlHash = task['url_hash'] as String;
     final chunkIndex = task['chunk_index'] as int;
     final byteStart = task['byte_start'] as int;
     final byteEnd = task['byte_end'] as int;
@@ -82,27 +83,20 @@ class DownloadWorkerEntry {
 
       final stream = response.data!.stream;
 
-      // 节流进度事件：最多每 200ms 发送一次，避免信号洪泛。
-      // Throttle progress events to at most once per 200ms to prevent signal flooding.
-      var lastProgressTime = DateTime.now().millisecondsSinceEpoch;
-      const progressIntervalMs = 200;
-
       await for (final chunk in stream) {
         if (cancelToken.isCancelled) break;
 
         await raf.writeFrom(chunk);
         totalDownloaded += chunk.length;
 
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (now - lastProgressTime >= progressIntervalMs) {
-          lastProgressTime = now;
-          sendPort.send({
-            'event': 'progress',
-            'chunk_index': chunkIndex,
-            'downloaded_bytes': totalDownloaded,
-            'total_bytes': expectedBytes,
-          });
-        }
+        sendPort.send({
+          'event': 'progress',
+          'url_hash': urlHash,
+          'chunk_index': chunkIndex,
+          'downloaded_bytes': totalDownloaded,
+          'total_bytes': expectedBytes,
+          'data': chunk,
+        });
       }
 
       await raf.close();
@@ -113,20 +107,21 @@ class DownloadWorkerEntry {
         await File(tmpPath).rename(savePath);
         sendPort.send({
           'event': 'completed',
+          'url_hash': urlHash,
           'chunk_index': chunkIndex,
           'file_path': savePath,
           'bytes_written': totalDownloaded,
         });
       } else {
         await _cleanupTmp(tmpPath);
-        sendPort.send({'event': 'cancelled', 'chunk_index': chunkIndex});
+        sendPort.send({'event': 'cancelled', 'url_hash': urlHash, 'chunk_index': chunkIndex});
       }
     } on DioException catch (e) {
       await raf?.close();
       await _cleanupTmp(tmpPath);
 
       if (e.type == DioExceptionType.cancel) {
-        sendPort.send({'event': 'cancelled', 'chunk_index': chunkIndex});
+        sendPort.send({'event': 'cancelled', 'url_hash': urlHash, 'chunk_index': chunkIndex});
         return;
       }
 
@@ -137,6 +132,7 @@ class DownloadWorkerEntry {
 
       sendPort.send({
         'event': 'failed',
+        'url_hash': urlHash,
         'chunk_index': chunkIndex,
         'error_message': e.message ?? e.toString(),
         'retryable': retryable,
@@ -147,6 +143,7 @@ class DownloadWorkerEntry {
 
       sendPort.send({
         'event': 'failed',
+        'url_hash': urlHash,
         'chunk_index': chunkIndex,
         'error_message': e.toString(),
         'retryable': false,

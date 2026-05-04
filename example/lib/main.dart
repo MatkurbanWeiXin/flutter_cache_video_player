@@ -122,7 +122,6 @@ class _PlayerPageState extends State<PlayerPage> {
     setState(() => _ready = true);
     // Always start from the beginning when opening the demo.
     await _openCurrent();
-    await _controller.play();
   }
 
   Future<void> _openCurrent({bool resumeHistory = false}) async {
@@ -134,7 +133,6 @@ class _PlayerPageState extends State<PlayerPage> {
     if (index < 0 || index >= _demoPlaylist.length) return;
     setState(() => _index = index);
     await _openCurrent();
-    await _controller.play();
   }
 
   @override

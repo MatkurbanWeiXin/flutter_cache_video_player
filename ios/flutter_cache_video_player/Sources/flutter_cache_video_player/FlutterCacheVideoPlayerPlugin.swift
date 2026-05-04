@@ -298,7 +298,6 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
         }
 
         player = AVPlayer(playerItem: playerItem)
-        player?.play()
 
         // Position observer (every 200ms)
         let interval = CMTime(value: 1, timescale: 5)
@@ -322,7 +321,7 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
         // Start display link for texture updates
         startDisplayLink()
 
-        sendEvent(event: "playing", value: true)
+        sendEvent(event: "playing", value: false)
         sendEvent(event: "buffering", value: true)
     }
 

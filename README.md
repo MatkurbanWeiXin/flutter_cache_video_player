@@ -142,7 +142,7 @@ sudo pacman -S mpv
 
 ## How It Works
 
-1. **Request** — When `playXXX(url)` is called, the proxy server starts serving the media URL from
+1. **Request** — When `playXXX(url)` or `openXXX(url)` is called, the proxy server starts serving the media URL from
    `http://127.0.0.1:{port}`
 2. **Download** — The download manager creates a chunk queue and dispatches tasks to the Isolate worker pool based on
    priority
@@ -226,28 +226,28 @@ bitmap in the cache repository) — you do not need to feed it manually.
 
 ## Sources & Playback
 
-The controller exposes three explicit entry points plus a generic one. Only
-network sources are piped through the caching proxy; local files and Flutter
-assets are handed directly to the native player.
+The controller exposes paired open/play entry points plus generic variants.
+`play*` prepares the media and starts playback immediately. `open*` prepares
+the media and leaves it paused once ready. Only network sources are piped
+through the caching proxy; local files and Flutter assets are handed directly
+to the native player.
 
 ```dart
-// 1) Network — cached through the built-in HTTP proxy.
-await
-controller.playNetwork
-('https://example.com/video.mp4
-'
-);
+// 1) Network — cached through the built-in HTTP proxy and auto-plays.
+await controller.playNetwork('https://example.com/video.mp4');
 
-// 2) Local file — absolute path or file:// URI. No proxy, no caching.
+// 2) Network open-only — prepare, then start later.
+await controller.openNetwork('https://example.com/video.mp4');
+await controller.play();
+
+// 3) Local file — absolute path or file:// URI. No proxy, no caching.
 await controller.playFile('/absolute/path/to/movie.mp4');
 
-// 3) Flutter asset — first call extracts the asset to the temp directory.
+// 4) Flutter asset — first call extracts the asset to the temp directory.
 await controller.playAsset('assets/videos/intro.mp4');
 
-// 4) Generic — use when you already have a VideoSource.
-await controller.playSource(VideoSource.network('https://...'
-)
-);
+// 5) Generic — use when you already have a VideoSource.
+await controller.playSource(VideoSource.network('https://...'));
 ```
 
 When using `playAsset`, declare the asset under your app's `pubspec.yaml`:

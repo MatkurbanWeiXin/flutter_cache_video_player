@@ -48,7 +48,11 @@ class FlutterCacheVideoPlayerWeb {
         _open(args['url'] as String);
         return null;
       case 'play':
-        _videoElement?.play();
+        _videoElement?.play().toDart.catchError((_) {
+          _sendEvent('playing', false);
+          _sendEvent('buffering', false);
+          return null;
+        });
         return null;
       case 'pause':
         _videoElement?.pause();
@@ -182,16 +186,8 @@ class FlutterCacheVideoPlayerWeb {
   void _open(String url) {
     _videoElement?.src = url;
     _videoElement?.load();
+    _sendEvent('playing', false);
     _sendEvent('buffering', true);
-    // 自动播放：load 后立即调用 play()，与 Android/Windows 原生端行为一致。
-    // 浏览器自动播放策略可能拒绝，捕获异常后发送 playing(false) 让 Dart 转入 paused 状态。
-    // Auto-play: call play() right after load(), matching Android/Windows native behavior.
-    // Browser autoplay policy may reject; catch and send playing(false) so Dart transitions to paused.
-    _videoElement?.play().toDart.catchError((_) {
-      _sendEvent('playing', false);
-      _sendEvent('buffering', false);
-      return null;
-    });
   }
 
   void _startPositionTimer() {

@@ -11,7 +11,7 @@ import 'native_player_controller.dart';
 /// 播放控制器，封装 NativePlayerController 并管理生命周期、事件监听和历史持久化。
 /// Player controller wrapping NativePlayerController with lifecycle management, event listeners, and history persistence.
 class VideoPlayerController {
-  late final NativePlayerController _nativeController;
+  final NativePlayerController _nativeController;
 
   final List<VoidCallback> _disposers = <VoidCallback>[];
 
@@ -20,6 +20,11 @@ class VideoPlayerController {
   /// Guards against stale native events from the previous media session.
   /// Reset to false on open(), set to true when playing(true) is received.
   bool _hasPlayedSinceOpen = false;
+
+  /// 防止媒体已经 ready 但尚未开始播放时，UI 仍然停留在 loading。
+  /// Tracks whether the current media session has produced a readiness signal
+  /// (for example duration metadata) even if playback has not started yet.
+  bool _hasReadySinceOpen = false;
 
   final FlutterSignal<PlayState> playState = signal(PlayState.idle);
 
@@ -42,7 +47,10 @@ class VideoPlayerController {
   /// 当前媒体的缓存进度（0.0 – 1.0），由插件根据下载位图自动更新。
   /// Current media cached progress (0.0 – 1.0), auto-updated by the plugin
   /// from the download bitmap.
-  final FlutterSignal<double> bufferedProgress = signal<double>(0.0);
+  final FlutterSignal<double> cachedProgress = signal<double>(0.0);
+
+  @Deprecated('Use cachedProgress for cache/download progress.')
+  FlutterSignal<double> get bufferedProgress => cachedProgress;
 
   /// 当前媒体已缓存字节数。
   /// Bytes downloaded for the current media.
@@ -86,9 +94,8 @@ class VideoPlayerController {
     return position.value.inMilliseconds / duration.value.inMilliseconds;
   });
 
-  VideoPlayerController() {
-    _nativeController = NativePlayerController();
-  }
+  VideoPlayerController({NativePlayerController? nativeController})
+    : _nativeController = nativeController ?? NativePlayerController();
 
   /// 原生纹理 ID，用于 Texture widget。
   /// Native texture ID for the Texture widget.
@@ -103,30 +110,40 @@ class VideoPlayerController {
       if (playing) {
         final wasFirstPlay = !_hasPlayedSinceOpen;
         _hasPlayedSinceOpen = true;
+        _markReadySinceOpen();
         if (wasFirstPlay) {
           final dur = _nativeController.durationSignal.value;
           if (dur > Duration.zero) {
             duration.value = dur;
           }
         }
-      } else if (!_hasPlayedSinceOpen) {
+        playState.value = PlayState.playing;
         return;
       }
-      playState.value = playing ? PlayState.playing : PlayState.paused;
+      if (!_hasReadySinceOpen) {
+        return;
+      }
+      if (playState.value == PlayState.stopped) {
+        return;
+      }
+      playState.value = PlayState.paused;
     });
     VoidCallback positionEffect = effect(() {
       final value = _nativeController.positionSignal.value;
-      if (!_hasPlayedSinceOpen) return;
+      if (!_hasReadySinceOpen) return;
       position.value = value;
     });
     VoidCallback durationEffect = effect(() {
       final value = _nativeController.durationSignal.value;
-      if (!_hasPlayedSinceOpen) return;
+      if (value > Duration.zero && !_hasReadySinceOpen) {
+        _markReadySinceOpen();
+      }
+      if (!_hasReadySinceOpen) return;
       duration.value = value;
     });
     VoidCallback bufferingEffect = effect(() {
       final buffering = _nativeController.bufferingSignal.value;
-      if (!_hasPlayedSinceOpen) return;
+      if (!_hasReadySinceOpen) return;
       isBuffering.value = buffering;
     });
     VoidCallback errorEffect = effect(() {
@@ -145,6 +162,9 @@ class VideoPlayerController {
     VoidCallback videoSizeEffect = effect(() {
       final size = _nativeController.videoSizeSignal.value;
       videoSize.value = size;
+      if (size.width > 0 && size.height > 0 && !_hasReadySinceOpen) {
+        _markReadySinceOpen();
+      }
     });
     _disposers.addAll([
       playingEffect,
@@ -157,40 +177,93 @@ class VideoPlayerController {
     ]);
   }
 
+  void _markReadySinceOpen() {
+    if (_hasReadySinceOpen) return;
+    _hasReadySinceOpen = true;
+
+    final nativeDuration = _nativeController.durationSignal.value;
+    if (nativeDuration > Duration.zero) {
+      duration.value = nativeDuration;
+    }
+    isBuffering.value = _nativeController.bufferingSignal.value;
+
+    if (!_nativeController.playingSignal.value && playState.value == PlayState.loading) {
+      playState.value = PlayState.paused;
+    }
+  }
+
   int _estimateByteOffset(Duration position) {
     if (duration.value.inMilliseconds == 0) return 0;
     return 0;
   }
 
-  /// 播放一个网络地址（`http(s)://...`），走插件的缓存代理。
-  /// Play a network URL (`http(s)://...`) routed through the caching proxy.
+  /// 打开并播放一个网络地址（`http(s)://...`），走插件的缓存代理。
+  /// Open and start playing a network URL (`http(s)://...`) routed through
+  /// the caching proxy.
   Future<void> playNetwork(String url, {bool resumeHistory = false}) {
-    return _openSource(VideoSource.network(url), resumeHistory: resumeHistory);
+    return _openSource(VideoSource.network(url), resumeHistory: resumeHistory, autoPlay: true);
   }
 
-  /// 播放本地文件（绝对路径或 `file://` URI）。不走代理。
-  /// Play a local file (absolute path or `file://` URI). Bypasses the proxy.
+  /// 仅打开网络地址，等待调用方稍后显式触发 [play]。
+  /// Open a network URL and leave it paused once ready.
+  Future<void> openNetwork(String url, {bool resumeHistory = false}) {
+    return _openSource(VideoSource.network(url), resumeHistory: resumeHistory, autoPlay: false);
+  }
+
+  /// 打开并播放本地文件（绝对路径或 `file://` URI）。不走代理。
+  /// Open and start playing a local file (absolute path or `file://` URI).
+  /// Bypasses the proxy.
   Future<void> playFile(String path, {bool resumeHistory = false}) {
-    return _openSource(VideoSource.file(path), resumeHistory: resumeHistory);
+    return _openSource(VideoSource.file(path), resumeHistory: resumeHistory, autoPlay: true);
   }
 
-  /// 播放 Flutter assets 中的媒体；首次调用会抽取到临时目录。不走代理。
-  /// Play a media bundled as a Flutter asset; first use extracts it to temp.
+  /// 仅打开本地文件，等待调用方稍后显式触发 [play]。
+  /// Open a local file and leave it paused once ready.
+  Future<void> openFile(String path, {bool resumeHistory = false}) {
+    return _openSource(VideoSource.file(path), resumeHistory: resumeHistory, autoPlay: false);
+  }
+
+  /// 打开并播放 Flutter assets 中的媒体；首次调用会抽取到临时目录。不走代理。
+  /// Open and start playing a media bundled as a Flutter asset; first use
+  /// extracts it to temp.
   Future<void> playAsset(String assetPath, {AssetBundle? bundle, bool resumeHistory = false}) {
-    return _openSource(VideoSource.asset(assetPath, bundle: bundle), resumeHistory: resumeHistory);
+    return _openSource(
+      VideoSource.asset(assetPath, bundle: bundle),
+      resumeHistory: resumeHistory,
+      autoPlay: true,
+    );
   }
 
-  /// 使用 [VideoSource] 直接打开。
-  /// Open the given [VideoSource] directly.
+  /// 仅打开 Flutter assets 中的媒体，等待调用方稍后显式触发 [play]。
+  /// Open a bundled media asset and leave it paused once ready.
+  Future<void> openAsset(String assetPath, {AssetBundle? bundle, bool resumeHistory = false}) {
+    return _openSource(
+      VideoSource.asset(assetPath, bundle: bundle),
+      resumeHistory: resumeHistory,
+      autoPlay: false,
+    );
+  }
+
+  /// 使用 [VideoSource] 直接打开并开始播放。
+  /// Open the given [VideoSource] and start playback.
   Future<void> playSource(VideoSource source, {bool resumeHistory = false}) {
-    return _openSource(source, resumeHistory: resumeHistory);
+    return _openSource(source, resumeHistory: resumeHistory, autoPlay: true);
   }
 
-  Future<void> _openSource(VideoSource source, {required bool resumeHistory}) async {
+  /// 使用 [VideoSource] 直接打开，等待调用方稍后显式触发 [play]。
+  /// Open the given [VideoSource] and leave it paused once ready.
+  Future<void> openSource(VideoSource source, {bool resumeHistory = false}) {
+    return _openSource(source, resumeHistory: resumeHistory, autoPlay: false);
+  }
+
+  Future<void> _openSource(
+    VideoSource source, {
+    required bool resumeHistory,
+    required bool autoPlay,
+  }) async {
     try {
       await _saveCurrentPosition();
 
-      _hasPlayedSinceOpen = false;
       reset();
 
       final identity = source.identity;
@@ -202,28 +275,29 @@ class VideoPlayerController {
       playState.value = PlayState.loading;
 
       final resolved = await source.resolveToNativeUrl();
-      final mediaUrl = await FlutterCacheVideoPlayer.instance.playerFactory.createMediaUrl(
-        source,
-        resolved,
-      );
+      final mediaUrl = await _resolveMediaUrl(source, resolved);
 
       await _nativeController.open(mediaUrl);
 
       if (source.isNetwork) {
-        // Start watching cache progress from the plugin's cache repository.
-        _subscribeCacheProgress(identity);
+        if (FlutterCacheVideoPlayer.instance.isInitialized) {
+          // Start watching cache progress from the plugin's cache repository.
+          _subscribeCacheProgress(identity);
+        } else {
+          await _cancelCacheSubscriptions();
+        }
       } else {
         // Local sources are "fully cached" by definition. Skip cache
         // subscriptions entirely.
         await _cancelCacheSubscriptions();
         batch(() {
           isFullyCached.value = true;
-          bufferedProgress.value = 1.0;
+          cachedProgress.value = 1.0;
           downloadedBytes.value = _safeFileSize(resolved);
         });
       }
 
-      if (resumeHistory) {
+      if (resumeHistory && FlutterCacheVideoPlayer.instance.isInitialized) {
         final urlHash = UrlHasher.hash(identity);
         try {
           final history = await FlutterCacheVideoPlayer.instance.historyRepo.getLastPosition(
@@ -234,9 +308,30 @@ class VideoPlayerController {
           }
         } catch (_) {}
       }
+
+      if (autoPlay) {
+        await _nativeController.play();
+      }
     } catch (e) {
       errorMessage.value = e.toString();
       playState.value = PlayState.error;
+    }
+  }
+
+  Future<String> _resolveMediaUrl(VideoSource source, String resolvedUrl) async {
+    if (!source.isNetwork) {
+      return resolvedUrl;
+    }
+
+    final plugin = FlutterCacheVideoPlayer.instance;
+    if (!plugin.isInitialized) {
+      return resolvedUrl;
+    }
+
+    try {
+      return await plugin.playerFactory.createMediaUrl(source, resolvedUrl);
+    } catch (_) {
+      return resolvedUrl;
     }
   }
 
@@ -275,7 +370,7 @@ class VideoPlayerController {
   /// Seek to the specified position.
   Future<void> seek(Duration position) async {
     await _nativeController.seek(position.inMilliseconds);
-    if (currentUrl.value != null) {
+    if (currentUrl.value != null && FlutterCacheVideoPlayer.instance.isInitialized) {
       final byteOffset = _estimateByteOffset(position);
       FlutterCacheVideoPlayer.instance.downloadManager.onSeek(byteOffset);
     }
@@ -321,6 +416,7 @@ class VideoPlayerController {
   Future<void> _saveCurrentPosition() async {
     if (currentUrl.value == null) return;
     if (position.value.inMilliseconds <= 0) return;
+    if (!FlutterCacheVideoPlayer.instance.isInitialized) return;
 
     final urlHash = UrlHasher.hash(currentUrl.value!);
     await FlutterCacheVideoPlayer.instance.historyRepo.savePosition(
@@ -350,7 +446,7 @@ class VideoPlayerController {
     _currentTotalChunks = 0;
   }
 
-  /// 订阅当前媒体的缓存进度，实时更新 [bufferedProgress] 等 signals。
+  /// 订阅当前媒体的缓存进度，实时更新 [cachedProgress] 等 signals。
   /// Subscribes to the download bitmap for [url] and drives cache signals.
   Future<void> _subscribeCacheProgress(String url) async {
     await _cancelCacheSubscriptions();
@@ -390,13 +486,15 @@ class VideoPlayerController {
   void _applyBitmap(ChunkBitmap bitmap) {
     downloadedBytes.value = bitmap.downloadedBytes;
     if (_currentTotalChunks > 0) {
-      bufferedProgress.value = bitmap.getProgress(_currentTotalChunks).clamp(0.0, 1.0);
+      cachedProgress.value = bitmap.getProgress(_currentTotalChunks).clamp(0.0, 1.0);
     }
   }
 
   /// 重置所有状态为初始值。
   /// Resets all state to initial values.
   void reset() {
+    _hasPlayedSinceOpen = false;
+    _hasReadySinceOpen = false;
     batch(() {
       playState.value = PlayState.idle;
       position.value = Duration.zero;
@@ -405,7 +503,7 @@ class VideoPlayerController {
       errorMessage.value = null;
       currentUrl.value = null;
       mimeType.value = null;
-      bufferedProgress.value = 0.0;
+      cachedProgress.value = 0.0;
       downloadedBytes.value = 0;
       isFullyCached.value = false;
       videoSize.value = Size.zero;

@@ -87,6 +87,7 @@ sealed class WorkerEvent {
     switch (msg['event'] as String) {
       case 'progress':
         return ChunkProgress(
+          urlHash: msg['url_hash'] as String,
           chunkIndex: msg['chunk_index'] as int,
           downloadedBytes: msg['downloaded_bytes'] as int,
           totalBytes: msg['total_bytes'] as int,
@@ -94,18 +95,23 @@ sealed class WorkerEvent {
         );
       case 'completed':
         return ChunkCompleted(
+          urlHash: msg['url_hash'] as String,
           chunkIndex: msg['chunk_index'] as int,
           filePath: msg['file_path'] as String,
           bytesWritten: msg['bytes_written'] as int,
         );
       case 'failed':
         return ChunkFailed(
+          urlHash: msg['url_hash'] as String,
           chunkIndex: msg['chunk_index'] as int,
           errorMessage: msg['error_message'] as String,
           retryable: msg['retryable'] as bool,
         );
       case 'cancelled':
-        return WorkerCancelled(chunkIndex: msg['chunk_index'] as int);
+        return WorkerCancelled(
+          urlHash: msg['url_hash'] as String,
+          chunkIndex: msg['chunk_index'] as int,
+        );
       case 'ready':
         return WorkerReady();
       default:
@@ -117,12 +123,14 @@ sealed class WorkerEvent {
 /// 分片下载进度事件，包含已下载字节和流数据。
 /// Chunk download progress event carrying downloaded bytes and stream data.
 class ChunkProgress extends WorkerEvent {
+  final String urlHash;
   final int chunkIndex;
   final int downloadedBytes;
   final int totalBytes;
   final List<int>? data;
 
   const ChunkProgress({
+    required this.urlHash,
     required this.chunkIndex,
     required this.downloadedBytes,
     required this.totalBytes,
@@ -131,6 +139,7 @@ class ChunkProgress extends WorkerEvent {
 
   Map<String, dynamic> toMessage() => {
     'event': 'progress',
+    'url_hash': urlHash,
     'chunk_index': chunkIndex,
     'downloaded_bytes': downloadedBytes,
     'total_bytes': totalBytes,
@@ -141,11 +150,13 @@ class ChunkProgress extends WorkerEvent {
 /// 分片下载完成事件。
 /// Chunk download completion event.
 class ChunkCompleted extends WorkerEvent {
+  final String urlHash;
   final int chunkIndex;
   final String filePath;
   final int bytesWritten;
 
   const ChunkCompleted({
+    required this.urlHash,
     required this.chunkIndex,
     required this.filePath,
     required this.bytesWritten,
@@ -153,6 +164,7 @@ class ChunkCompleted extends WorkerEvent {
 
   Map<String, dynamic> toMessage() => {
     'event': 'completed',
+    'url_hash': urlHash,
     'chunk_index': chunkIndex,
     'file_path': filePath,
     'bytes_written': bytesWritten,
@@ -162,14 +174,21 @@ class ChunkCompleted extends WorkerEvent {
 /// 分片下载失败事件，包含错误信息和是否可重试。
 /// Chunk download failure event carrying error details and retryability.
 class ChunkFailed extends WorkerEvent {
+  final String urlHash;
   final int chunkIndex;
   final String errorMessage;
   final bool retryable;
 
-  const ChunkFailed({required this.chunkIndex, required this.errorMessage, this.retryable = true});
+  const ChunkFailed({
+    required this.urlHash,
+    required this.chunkIndex,
+    required this.errorMessage,
+    this.retryable = true,
+  });
 
   Map<String, dynamic> toMessage() => {
     'event': 'failed',
+    'url_hash': urlHash,
     'chunk_index': chunkIndex,
     'error_message': errorMessage,
     'retryable': retryable,
@@ -186,7 +205,12 @@ class WorkerReady extends WorkerEvent {
 /// Worker 取消完成事件，表示取消操作已清理完毕。
 /// Worker-cancelled event indicating the cancellation cleanup is done.
 class WorkerCancelled extends WorkerEvent {
+  final String urlHash;
   final int chunkIndex;
-  const WorkerCancelled({required this.chunkIndex});
-  Map<String, dynamic> toMessage() => {'event': 'cancelled', 'chunk_index': chunkIndex};
+  const WorkerCancelled({required this.urlHash, required this.chunkIndex});
+  Map<String, dynamic> toMessage() => {
+    'event': 'cancelled',
+    'url_hash': urlHash,
+    'chunk_index': chunkIndex,
+  };
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:signals_flutter/signals_flutter.dart';
@@ -8,6 +9,7 @@ import '../data/models/media_index.dart';
 import '../data/models/chunk_bitmap.dart';
 import '../data/repositories/cache_repository.dart';
 import '../download/download_manager.dart';
+import '../download/download_task.dart';
 import '../utils/file_utils.dart';
 import '../utils/url_hasher.dart';
 import 'range_handler.dart';
@@ -173,7 +175,7 @@ class ProxyCacheServer {
             // 位图标记完成但文件不存在——需要先使位图失效，否则 Worker 会跳过下载。
             // Bitmap says complete but file is gone — invalidate bitmap first,
             // otherwise the download manager will skip this chunk.
-            await downloadManager.invalidateAndDownloadChunk(i);
+            await downloadManager.invalidateAndDownloadChunk(i, urlHash: media.urlHash);
             await _downloadAndStream(controller, media, i, readStart, readEnd);
           }
         } else {
@@ -227,12 +229,19 @@ class ProxyCacheServer {
     int readEnd,
   ) async {
     // Request priority download
-    downloadManager.requestChunkPriority(chunkIndex);
+    if (!downloadManager.isActiveMedia(media.urlHash)) {
+      throw StateError('Download session switched before serving chunk $chunkIndex');
+    }
+    downloadManager.requestChunkPriority(chunkIndex, urlHash: media.urlHash);
+
+    final targetEndExclusive = readEnd + 1;
+    var streamedUntil = readStart;
 
     // 只等待下载完成/失败，不再订阅 progressStream 收集原始字节。
     // Only wait for completion/failure — no longer subscribing to progressStream for raw bytes.
     final dataCompleter = Completer<void>();
     final expectedUrlHash = media.urlHash;
+    StreamSubscription<ChunkProgress>? progressSubscription;
 
     // effect() 会立即以当前信号值执行一次。跳过首次执行以防止来自
     // 前一个下载会话的残留值误触发 Completer。
@@ -265,6 +274,44 @@ class ProxyCacheServer {
       }
     });
 
+    var sessionInitial = true;
+    final sessionDisposer = effect(() {
+      final currentUrlHash = downloadManager.activeUrlHash.value;
+      if (sessionInitial) {
+        sessionInitial = false;
+        return;
+      }
+      if (currentUrlHash != expectedUrlHash && !dataCompleter.isCompleted) {
+        dataCompleter.completeError(
+          StateError('Download session switched while serving chunk $chunkIndex'),
+        );
+      }
+    });
+
+    progressSubscription = downloadManager.progressStream.listen((event) {
+      if (event.urlHash != expectedUrlHash || event.chunkIndex != chunkIndex) return;
+      final data = event.data;
+      if (data == null || data.isEmpty) return;
+      if (streamedUntil >= targetEndExclusive) {
+        if (!dataCompleter.isCompleted) dataCompleter.complete();
+        return;
+      }
+
+      final eventStart = event.downloadedBytes - data.length;
+      final eventEnd = event.downloadedBytes;
+      final overlapStart = math.max(streamedUntil, math.max(readStart, eventStart));
+      final overlapEnd = math.min(targetEndExclusive, eventEnd);
+
+      if (overlapStart >= overlapEnd) return;
+
+      controller.add(data.sublist(overlapStart - eventStart, overlapEnd - eventStart));
+      streamedUntil = overlapEnd;
+
+      if (streamedUntil >= targetEndExclusive && !dataCompleter.isCompleted) {
+        dataCompleter.complete();
+      }
+    });
+
     // Race-condition guard: the chunk may have completed between the bitmap
     // read in _serveChunks and the stream subscriptions above.  Re-check on
     // disk so we don't wait for an event that already fired.
@@ -279,23 +326,27 @@ class ProxyCacheServer {
     try {
       await dataCompleter.future.timeout(const Duration(seconds: 15));
 
+      if (streamedUntil >= targetEndExclusive) {
+        return;
+      }
+
       // 下载完成后，直接从磁盘读取精确字节范围（支持合并文件回退）。
       // After download completes, read the exact byte range from disk (with merged file fallback).
       File file = File(chunkPath);
-      int offset = readStart;
+      int offset = streamedUntil;
 
       if (!await file.exists()) {
         // 分片文件已被合并，改从合并文件读取。
         // Chunk file has been merged; read from the merged file instead.
         file = File(mergedPath);
-        offset = chunkIndex * config.chunkSize + readStart;
+        offset = chunkIndex * config.chunkSize + streamedUntil;
       }
 
       if (await file.exists()) {
         final raf = await file.open(mode: FileMode.read);
         try {
           await raf.setPosition(offset);
-          final length = readEnd - readStart + 1;
+          final length = targetEndExclusive - streamedUntil;
           final data = await raf.read(length);
           controller.add(data);
         } finally {
@@ -305,8 +356,10 @@ class ProxyCacheServer {
         throw StateError('Chunk file not found after download: $chunkPath');
       }
     } finally {
+      await progressSubscription.cancel();
       completeDisposer();
       failDisposer();
+      sessionDisposer();
     }
   }
 
