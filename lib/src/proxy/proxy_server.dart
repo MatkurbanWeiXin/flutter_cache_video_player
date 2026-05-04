@@ -83,12 +83,39 @@ class ProxyCacheServer {
 
     if (range == null) {
       // No range header — serve full content with 200
+      await _ensurePrefixForRange(mediaIndex, 0);
       return _serveFullContent(mediaIndex);
     }
 
     final start = range.start;
     final end = range.resolvedEnd(mediaIndex.totalBytes);
+    await _ensurePrefixForRange(mediaIndex, start);
     return _serveRange(mediaIndex, start, end);
+  }
+
+  /// 在响应 Range 请求前，确保起始分片至少有 [config.proxyPrefetchBytes]
+  /// 字节可读，缓解 AVPlayer 等首字节超时（macOS OSStatus -12848）。
+  ///
+  /// Ensures the chunk that contains [byteOffset] has at least
+  /// `config.proxyPrefetchBytes` bytes on disk before the proxy responds.
+  /// Mitigates AVPlayer first-byte timeouts (e.g. macOS OSStatus -12848).
+  Future<void> _ensurePrefixForRange(MediaIndex media, int byteOffset) async {
+    final prefix = config.proxyPrefetchBytes;
+    if (prefix <= 0) return;
+    if (!downloadManager.isActiveMedia(media.urlHash)) return;
+
+    final chunkIndex = byteOffset ~/ config.chunkSize;
+    try {
+      await downloadManager.ensureChunkPrefix(
+        media.urlHash,
+        chunkIndex,
+        prefixBytes: prefix,
+        timeout: config.proxyPrefetchTimeout,
+      );
+    } catch (_) {
+      // 失败时让下游 _serveChunks 走错误流，调用方会以 500 收尾。
+      // On failure, fall through; _serveChunks will surface the error.
+    }
   }
 
   Future<Response> _serveFullContent(MediaIndex media) async {
@@ -102,7 +129,9 @@ class ProxyCacheServer {
     final endChunk = endByte ~/ config.chunkSize;
 
     final controller = StreamController<List<int>>();
-    _serveChunks(controller, media, bitmap, startChunk, endChunk, 0, endByte);
+    final cancelToken = _CancelToken();
+    controller.onCancel = () => cancelToken.cancel();
+    _serveChunks(controller, cancelToken, media, bitmap, startChunk, endChunk, 0, endByte);
 
     return Response.ok(
       controller.stream,
@@ -125,8 +154,10 @@ class ProxyCacheServer {
 
     // Build a stream that reads from local chunks or waits for download
     final controller = StreamController<List<int>>();
+    final cancelToken = _CancelToken();
+    controller.onCancel = () => cancelToken.cancel();
 
-    _serveChunks(controller, media, bitmap, startChunk, endChunk, start, end);
+    _serveChunks(controller, cancelToken, media, bitmap, startChunk, endChunk, start, end);
 
     final contentLength = end - start + 1;
     return Response(
@@ -145,6 +176,7 @@ class ProxyCacheServer {
 
   Future<void> _serveChunks(
     StreamController<List<int>> controller,
+    _CancelToken cancelToken,
     MediaIndex media,
     ChunkBitmap bitmap,
     int startChunk,
@@ -154,6 +186,7 @@ class ProxyCacheServer {
   ) async {
     try {
       for (int i = startChunk; i <= endChunk; i++) {
+        if (cancelToken.isCancelled) return;
         final chunkPath = '${media.localDir}/${FileUtils.chunkFileName(i)}';
         final mergedPath = '${media.localDir}/${FileUtils.mergedFileName()}';
 
@@ -170,28 +203,48 @@ class ProxyCacheServer {
           final chunkExists = await File(chunkPath).exists();
           final mergedExists = !chunkExists && await File(mergedPath).exists();
           if (chunkExists || mergedExists) {
-            await _readLocalChunk(controller, chunkPath, mergedPath, i, readStart, readEnd);
+            await _readLocalChunk(
+              controller,
+              cancelToken,
+              chunkPath,
+              mergedPath,
+              i,
+              readStart,
+              readEnd,
+            );
           } else {
             // 位图标记完成但文件不存在——需要先使位图失效，否则 Worker 会跳过下载。
             // Bitmap says complete but file is gone — invalidate bitmap first,
             // otherwise the download manager will skip this chunk.
             await downloadManager.invalidateAndDownloadChunk(i, urlHash: media.urlHash);
-            await _downloadAndStream(controller, media, i, readStart, readEnd);
+            await _downloadAndStream(controller, cancelToken, media, i, readStart, readEnd);
           }
         } else {
           // Request download and wait
-          await _downloadAndStream(controller, media, i, readStart, readEnd);
+          await _downloadAndStream(controller, cancelToken, media, i, readStart, readEnd);
         }
       }
-      await controller.close();
+      if (!controller.isClosed) {
+        await controller.close();
+      }
     } catch (e) {
+      // 客户端断开时，shelf 会关闭底层 sink；继续向控制器写入会得到
+      // "Cannot add new events after calling close" 等错误，这里安静吞掉。
+      // When the client disconnects, shelf closes the underlying sink;
+      // any further writes throw. Swallow if the cause is cancellation.
+      if (cancelToken.isCancelled || controller.isClosed) {
+        return;
+      }
       controller.addError(e);
-      await controller.close();
+      if (!controller.isClosed) {
+        await controller.close();
+      }
     }
   }
 
   Future<void> _readLocalChunk(
     StreamController<List<int>> controller,
+    _CancelToken cancelToken,
     String chunkPath,
     String mergedPath,
     int chunkIndex,
@@ -215,6 +268,7 @@ class ProxyCacheServer {
       await raf.setPosition(offset);
       final length = readEnd - readStart + 1;
       final data = await raf.read(length);
+      if (cancelToken.isCancelled || controller.isClosed) return;
       controller.add(data);
     } finally {
       await raf.close();
@@ -223,6 +277,7 @@ class ProxyCacheServer {
 
   Future<void> _downloadAndStream(
     StreamController<List<int>> controller,
+    _CancelToken cancelToken,
     MediaIndex media,
     int chunkIndex,
     int readStart,
@@ -242,6 +297,12 @@ class ProxyCacheServer {
     final dataCompleter = Completer<void>();
     final expectedUrlHash = media.urlHash;
     StreamSubscription<ChunkProgress>? progressSubscription;
+
+    // 客户端取消时立即解锁等待。
+    // Unblock the wait immediately when the client cancels.
+    final cancelDisposer = cancelToken.onCancel(() {
+      if (!dataCompleter.isCompleted) dataCompleter.complete();
+    });
 
     // effect() 会立即以当前信号值执行一次。跳过首次执行以防止来自
     // 前一个下载会话的残留值误触发 Completer。
@@ -289,6 +350,10 @@ class ProxyCacheServer {
     });
 
     progressSubscription = downloadManager.progressStream.listen((event) {
+      if (cancelToken.isCancelled || controller.isClosed) {
+        if (!dataCompleter.isCompleted) dataCompleter.complete();
+        return;
+      }
       if (event.urlHash != expectedUrlHash || event.chunkIndex != chunkIndex) return;
       final data = event.data;
       if (data == null || data.isEmpty) return;
@@ -312,12 +377,45 @@ class ProxyCacheServer {
       }
     });
 
+    // 在订阅就位后回填 .tmp 已落盘字节：调用方（如 ensureChunkPrefix）可能
+    // 先一步消费了早期进度事件，导致此处订阅会错过这些字节。worker 在
+    // 发出 progress 事件前已写入 .tmp，故文件长度即可信回填来源。
+    // After the subscription attaches, backfill from the worker's `.tmp`
+    // file. Earlier callers (e.g. ensureChunkPrefix) may have consumed
+    // progress events before this listener was wired up; the worker writes
+    // bytes to `.tmp` before emitting each progress event, so its length is
+    // a safe catch-up source.
+    final chunkPath = '${media.localDir}/${FileUtils.chunkFileName(chunkIndex)}';
+    final tmpPath = '$chunkPath.tmp';
+    try {
+      final tmpFile = File(tmpPath);
+      if (await tmpFile.exists()) {
+        final existing = await tmpFile.length();
+        final wantEnd = math.min(existing, targetEndExclusive);
+        if (wantEnd > streamedUntil && !cancelToken.isCancelled && !controller.isClosed) {
+          final raf = await tmpFile.open(mode: FileMode.read);
+          try {
+            await raf.setPosition(streamedUntil);
+            final data = await raf.read(wantEnd - streamedUntil);
+            if (!cancelToken.isCancelled && !controller.isClosed) {
+              controller.add(data);
+              streamedUntil = wantEnd;
+            }
+          } finally {
+            await raf.close();
+          }
+          if (streamedUntil >= targetEndExclusive && !dataCompleter.isCompleted) {
+            dataCompleter.complete();
+          }
+        }
+      }
+    } catch (_) {}
+
     // Race-condition guard: the chunk may have completed between the bitmap
     // read in _serveChunks and the stream subscriptions above.  Re-check on
     // disk so we don't wait for an event that already fired.
     // Also check the merged file: after ChunkMerger runs, individual chunk
     // files are deleted and replaced by a single merged file.
-    final chunkPath = '${media.localDir}/${FileUtils.chunkFileName(chunkIndex)}';
     final mergedPath = '${media.localDir}/${FileUtils.mergedFileName()}';
     if (await File(chunkPath).exists() || await File(mergedPath).exists()) {
       if (!dataCompleter.isCompleted) dataCompleter.complete();
@@ -325,6 +423,10 @@ class ProxyCacheServer {
 
     try {
       await dataCompleter.future.timeout(const Duration(seconds: 15));
+
+      if (cancelToken.isCancelled || controller.isClosed) {
+        return;
+      }
 
       if (streamedUntil >= targetEndExclusive) {
         return;
@@ -348,7 +450,9 @@ class ProxyCacheServer {
           await raf.setPosition(offset);
           final length = targetEndExclusive - streamedUntil;
           final data = await raf.read(length);
-          controller.add(data);
+          if (!cancelToken.isCancelled && !controller.isClosed) {
+            controller.add(data);
+          }
         } finally {
           await raf.close();
         }
@@ -357,6 +461,7 @@ class ProxyCacheServer {
       }
     } finally {
       await progressSubscription.cancel();
+      cancelDisposer();
       completeDisposer();
       failDisposer();
       sessionDisposer();
@@ -526,3 +631,40 @@ class ProxyCacheServer {
     _server = null;
   }
 }
+
+/// 单次取消信号，配合 `StreamController.onCancel` 让客户端断开
+/// （AVPlayer 取消旧 Range 请求）时立即终止下游服务循环。
+///
+/// One-shot cancellation token paired with `StreamController.onCancel`,
+/// so client disconnects (e.g. AVPlayer aborting old Range requests)
+/// immediately tear down the producer loop.
+class _CancelToken {
+  bool _cancelled = false;
+  final List<void Function()> _listeners = <void Function()>[];
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    final snapshot = List<void Function()>.from(_listeners);
+    _listeners.clear();
+    for (final cb in snapshot) {
+      try {
+        cb();
+      } catch (_) {}
+    }
+  }
+
+  /// 注册取消回调，返回反注册闭包。
+  /// Registers a cancel callback; returns a disposer.
+  void Function() onCancel(void Function() callback) {
+    if (_cancelled) {
+      callback();
+      return () {};
+    }
+    _listeners.add(callback);
+    return () => _listeners.remove(callback);
+  }
+}
+

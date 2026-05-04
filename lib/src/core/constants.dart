@@ -57,6 +57,20 @@ class CacheConfig {
   /// High speed threshold in bytes per second.
   final int highSpeedThreshold;
 
+  /// 代理在响应 Range 请求前，需要先确保起始位置至少有多少字节可读。
+  /// 设为 0 可禁用。仅对未完成且无合并文件的分片生效。
+  ///
+  /// Minimum number of bytes the proxy ensures are downloaded at the start
+  /// of a Range request before responding. Set to 0 to disable. Only applies
+  /// to chunks that are neither completed nor present in the merged file.
+  final int proxyPrefetchBytes;
+
+  /// `proxyPrefetchBytes` 的等待超时；超时后照常返回响应让播放器决定。
+  ///
+  /// Wait timeout for `proxyPrefetchBytes`. On timeout the proxy responds
+  /// anyway and lets the player handle the stall.
+  final Duration proxyPrefetchTimeout;
+
   const CacheConfig({
     this.chunkSize = 2 * 1024 * 1024,
     this.maxCacheBytes = 2 * 1024 * 1024 * 1024,
@@ -72,6 +86,8 @@ class CacheConfig {
     this.enableChunkChecksum = false,
     this.lowSpeedThreshold = 128 * 1024,
     this.highSpeedThreshold = 1280 * 1024,
+    this.proxyPrefetchBytes = 256 * 1024,
+    this.proxyPrefetchTimeout = const Duration(seconds: 8),
   });
 
   /// 创建当前配置的副本，可选择性覆盖部分参数。
@@ -91,6 +107,8 @@ class CacheConfig {
     bool? enableChunkChecksum,
     int? lowSpeedThreshold,
     int? highSpeedThreshold,
+    int? proxyPrefetchBytes,
+    Duration? proxyPrefetchTimeout,
   }) {
     return CacheConfig(
       chunkSize: chunkSize ?? this.chunkSize,
@@ -107,6 +125,8 @@ class CacheConfig {
       enableChunkChecksum: enableChunkChecksum ?? this.enableChunkChecksum,
       lowSpeedThreshold: lowSpeedThreshold ?? this.lowSpeedThreshold,
       highSpeedThreshold: highSpeedThreshold ?? this.highSpeedThreshold,
+      proxyPrefetchBytes: proxyPrefetchBytes ?? this.proxyPrefetchBytes,
+      proxyPrefetchTimeout: proxyPrefetchTimeout ?? this.proxyPrefetchTimeout,
     );
   }
 }

@@ -174,6 +174,18 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
     private var presentationSizeObservation: NSKeyValueObservation?
     private var didPlayToEndObserver: NSObjectProtocol?
     private var timer: Timer?
+    private var currentUrl: String?
+    /// 已发起的瞬时错误重试次数。超过 `maxTransientRetries` 后才把错误
+    /// 真正抛给 Flutter 侧。
+    /// Number of transient-failure retries already attempted. Beyond
+    /// `maxTransientRetries` the error is finally surfaced to Flutter.
+    private var transientRetryCount = 0
+    private let maxTransientRetries = 4
+    /// 调用方期望的播放状态。`open()` 重置；`play()`/`pause()` 更新；
+    /// 用于在 `.failed` 静默重试后恢复同一播放意图。
+    /// Tracks the caller-intended play state so the silent retry path can
+    /// resume playback after recreating AVPlayer.
+    private var wantsToPlay = false
 
     init(textureRegistry: FlutterTextureRegistry) {
         self.textureRegistry = textureRegistry
@@ -217,13 +229,28 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
     /// Opens the media URL for playback.
     func open(url: String) {
         cleanupPlayer()
+        currentUrl = url
+        transientRetryCount = 0
+        wantsToPlay = false
+        openInternal(url: url)
+    }
 
+    private func openInternal(url: String) {
         guard let mediaUrl = URL(string: url) else {
             sendEvent(event: "error", value: "Invalid URL: \(url)")
             return
         }
 
-        let asset = AVURLAsset(url: mediaUrl)
+        // 显式传入 AVURLAsset 选项，强化对本地代理 HTTP 流的兼容性，避免
+        // AVPlayer 在首字节抵达前过早判定为 Cannot Open（OSStatus -12848）。
+        // Pass explicit AVURLAsset options to harden compatibility with the
+        // local caching proxy, so AVPlayer doesn't bail with OSStatus -12848
+        // ("Cannot Open") before the first bytes arrive.
+        let assetOptions: [String: Any] = [
+            AVURLAssetPreferPreciseDurationAndTimingKey: true,
+            "AVURLAssetHTTPHeaderFieldsKey": [String: String](),
+        ]
+        let asset = AVURLAsset(url: mediaUrl, options: assetOptions)
         playerItem = AVPlayerItem(asset: asset)
 
         let outputSettings: [String: Any] = [
@@ -244,10 +271,43 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
                 self.sendEvent(event: "duration", value: durationMs)
                 self.sendEvent(event: "buffering", value: false)
             case .failed:
-                let desc = item.error?.localizedDescription ?? "Unknown error"
+                let nsError = item.error as NSError?
                 let underlying =
-                    (item.error as NSError?)?.userInfo[NSUnderlyingErrorKey]
-                    as? NSError
+                    nsError?.userInfo[NSUnderlyingErrorKey] as? NSError
+                let code = underlying?.code ?? nsError?.code ?? 0
+                let domain = underlying?.domain ?? nsError?.domain ?? ""
+                if self.shouldRetryTransientFailure(code: code, domain: domain) {
+                    self.transientRetryCount += 1
+                    if let url = self.currentUrl {
+                        // 退避延迟：让本地代理累积更多字节后再重开 AVPlayer。
+                        // 第 1 次 200ms、第 2 次 600ms、第 3 次 1200ms…
+                        // Backoff: give the local proxy time to accumulate
+                        // bytes before AVPlayer reopens. 200 / 600 / 1200 ms.
+                        let delayMs = min(200 * (1 << (self.transientRetryCount - 1)), 1500)
+                        self.cleanupPlayerKeepingTexture()
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + .milliseconds(delayMs)
+                        ) { [weak self] in
+                            guard let self = self,
+                                self.currentUrl == url
+                            else { return }
+                            self.openInternal(url: url)
+                            // 恢复调用方原本的播放意图（Dart 在 .failed 之前
+                            // 已经调用过 play()，但那一次作用在已被废弃的旧
+                            // AVPlayer 上）。
+                            // Restore caller-intended playback: Dart's earlier
+                            // play() call landed on the now-discarded AVPlayer
+                            // instance, so re-issue it on the new one.
+                            if self.wantsToPlay {
+                                self.player?.play()
+                                self.sendEvent(event: "playing", value: true)
+                            }
+                        }
+                        return
+                    }
+                }
+                let desc =
+                    nsError?.localizedDescription ?? "Unknown error"
                 let detail = underlying?.localizedDescription ?? ""
                 let msg = detail.isEmpty ? desc : "\(desc) (\(detail))"
                 self.sendEvent(event: "error", value: msg)
@@ -297,6 +357,16 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
             object: playerItem,
             queue: .main
         ) { [weak self] _ in
+            // 先把播放状态翻回 false，确保下一次 replay 调用 play() 时
+            // playingSignal 能产生真实的 false→true 变化，触发 Flutter
+            // 侧 effect 把 playState 从 stopped 切回 playing（修复重试
+            // 按钮停留在重播图标的问题）。
+            // Flip playing back to false before reporting completion so the
+            // next play() produces a real false→true transition on the
+            // playing signal. Without this, replay leaves playState stuck
+            // at "stopped" because the signal value never changes.
+            self?.wantsToPlay = false
+            self?.sendEvent(event: "playing", value: false)
             self?.sendEvent(event: "completed", value: nil)
         }
 
@@ -309,12 +379,14 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
 
     /// 开始播放。 / Starts playback.
     func play() {
+        wantsToPlay = true
         player?.play()
         sendEvent(event: "playing", value: true)
     }
 
     /// 暂停播放。 / Pauses playback.
     func pause() {
+        wantsToPlay = false
         player?.pause()
         sendEvent(event: "playing", value: false)
     }
@@ -334,10 +406,13 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
     func setSpeed(speed: Float) {
         player?.rate = speed
     }
-
-    /// 释放播放器资源。 / Disposes the player resources.
+    /// 释放播放器资源。
+    /// Disposes the player resources.
     func dispose() {
         cleanupPlayer()
+        currentUrl = nil
+        transientRetryCount = 0
+        wantsToPlay = false
         if textureId != -1 {
             textureRegistry.unregisterTexture(textureId)
             textureId = -1
@@ -347,6 +422,14 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
     // MARK: - Private
 
     private func cleanupPlayer() {
+        cleanupPlayerKeepingTexture()
+    }
+
+    /// 与 cleanupPlayer 等价，但保留纹理注册以便重试时复用。
+    /// Same as cleanupPlayer; texture registration is preserved either way
+    /// (only `dispose()` unregisters), but kept as a separate name to make
+    /// retry-flow intent explicit at call sites.
+    private func cleanupPlayerKeepingTexture() {
         stopFrameTimer()
 
         if let observer = timeObserver {
@@ -403,6 +486,20 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
         DispatchQueue.main.async { [weak self] in
             self?.eventSink?(["event": event, "value": value as Any])
         }
+    }
+
+    /// 判断 AVPlayer 失败是否属于可重试的"首字节竞态"类错误。
+    /// 实战中 -12848 / NSURLError 重置等错误的 code 包装层级不固定
+    /// （outer / underlying / userInfo 内嵌套），故采用"重试次数上限 +
+    /// 退避延迟"的统一策略，由 `transientRetryCount` 控制不会无限循环。
+    ///
+    /// Whether an AVPlayer failure should trigger the silent retry path.
+    /// In practice -12848 and NSURLError resets nest their code in
+    /// inconsistent layers (outer vs. underlying vs. nested userInfo), so
+    /// instead of brittle code matching we cap retries via
+    /// `transientRetryCount` and rely on backoff to let the proxy catch up.
+    private func shouldRetryTransientFailure(code: Int, domain: String) -> Bool {
+        return transientRetryCount < maxTransientRetries
     }
 
     // MARK: - Snapshot / Covers

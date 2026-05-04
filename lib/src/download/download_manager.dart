@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:signals_flutter/signals_flutter.dart';
 import '../core/constants.dart';
@@ -383,6 +384,119 @@ class DownloadManager {
   }
 
   bool isActiveMedia(String urlHash) => _currentUrlHash == urlHash;
+
+  /// 等待指定分片至少有 [prefixBytes] 字节落盘（或全部完成）。
+  ///
+  /// 用于本地代理在响应 Range 请求前先确保有少量字节可读，避免 AVPlayer
+  /// 等待空响应过久而触发 OSStatus -12848 等首字节超时类错误。
+  ///
+  /// * 已完成 / 合并文件已存在 → 立即返回。
+  /// * 等待期间下载失败或分片被取消 → 抛出异常。
+  /// * 超时 → 静默返回，让调用方继续走原有边下边播路径。
+  ///
+  /// Awaits at least [prefixBytes] bytes of [chunkIndex] to be persisted on
+  /// disk (or full completion). Returns silently on timeout. Throws on
+  /// failure / cancellation so the proxy can fall back gracefully.
+  Future<void> ensureChunkPrefix(
+    String urlHash,
+    int chunkIndex, {
+    required int prefixBytes,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (PlatformDetector.isWeb) return;
+    if (prefixBytes <= 0) return;
+
+    final session = _sessionFor(urlHash);
+    if (session == null) return;
+
+    // 已完成 → 已经在磁盘上。
+    // Already done — bytes are on disk.
+    if (session.bitmap.isChunkCompleted(chunkIndex)) return;
+
+    // 合并文件存在意味着旧会话已经写出全部字节，直接返回。
+    // Merged file exists → all bytes already on disk; nothing to wait for.
+    final mergedPath = '${session.media.localDir}/${FileUtils.mergedFileName()}';
+    if (await File(mergedPath).exists()) return;
+
+    // 上限：分片本身大小（最后一个分片可能比 chunkSize 小）。
+    // Cap at the actual chunk size (last chunk may be shorter than chunkSize).
+    final byteStart = chunkIndex * config.chunkSize;
+    final maxChunkBytes = (session.media.totalBytes - byteStart).clamp(0, config.chunkSize);
+    if (maxChunkBytes == 0) return;
+    final target = prefixBytes < maxChunkBytes ? prefixBytes : maxChunkBytes;
+
+    // 提升优先级，确保 worker 立刻开下载。
+    // Promote to P0 so the worker starts immediately.
+    requestChunkPriority(chunkIndex, urlHash: urlHash);
+
+    final completer = Completer<void>();
+    var streamed = 0;
+    StreamSubscription<ChunkProgress>? sub;
+    void Function()? completeDisposer;
+    void Function()? failDisposer;
+
+    void finishOk() {
+      if (!completer.isCompleted) completer.complete();
+    }
+
+    void finishErr(Object err) {
+      if (!completer.isCompleted) completer.completeError(err);
+    }
+
+    sub = progressStream.listen((event) {
+      if (event.urlHash != urlHash || event.chunkIndex != chunkIndex) return;
+      streamed = event.downloadedBytes;
+      if (streamed >= target) finishOk();
+    });
+
+    var completeInitial = true;
+    completeDisposer = effect(() {
+      final e = latestCompletion.value;
+      if (completeInitial) {
+        completeInitial = false;
+        return;
+      }
+      if (e != null && e.urlHash == urlHash && e.chunkIndex == chunkIndex) {
+        finishOk();
+      }
+    });
+
+    var failInitial = true;
+    failDisposer = effect(() {
+      final e = latestFailure.value;
+      if (failInitial) {
+        failInitial = false;
+        return;
+      }
+      if (e != null && e.urlHash == urlHash && e.chunkIndex == chunkIndex) {
+        finishErr(StateError('Prefix prefetch failed: ${e.errorMessage}'));
+      }
+    });
+
+    // 进入等待前再做一次磁盘检查，规避位图刚刚被更新但 effect 尚未观测的竞态。
+    // Re-check the bitmap / disk before waiting to dodge the race where the
+    // chunk completed between our entry checks and subscription setup.
+    if (session.bitmap.isChunkCompleted(chunkIndex)) {
+      finishOk();
+    } else if (await File(mergedPath).exists()) {
+      finishOk();
+    }
+
+    try {
+      await completer.future.timeout(
+        timeout,
+        onTimeout: () {
+          // 静默忽略——调用方继续走原有路径。
+          // Swallow timeout — caller continues with the original code path.
+          return;
+        },
+      );
+    } finally {
+      await sub.cancel();
+      completeDisposer();
+      failDisposer();
+    }
+  }
 
   ChunkBitmap? get currentBitmap => _activeSession?.bitmap;
 

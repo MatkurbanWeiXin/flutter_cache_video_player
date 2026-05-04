@@ -315,6 +315,10 @@ class NativeVideoPlayer: NSObject, FlutterTexture, FlutterStreamHandler {
             object: playerItem,
             queue: .main
         ) { [weak self] _ in
+            // 先翻 false，让下一次 replay 的 play() 能产生真实状态变化。
+            // Flip playing back to false so a subsequent replay's play()
+            // produces a real false→true transition on the playing signal.
+            self?.sendEvent(event: "playing", value: false)
             self?.sendEvent(event: "completed", value: nil)
         }
 
