@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.7.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.6.1...v1.7.0) (2026-05-04)
+
+
+### Features
+
+* **proxy:** enhance chunk download handling and session management ([fe6a6d9](https://github.com/Matkurban/flutter_cache_video_player/commit/fe6a6d9d486b019d3f65d1cb87166ab40a91b70f))
+* **video_player:** update cached progress handling ([fe6a6d9](https://github.com/Matkurban/flutter_cache_video_player/commit/fe6a6d9d486b019d3f65d1cb87166ab40a91b70f))
+* 优化初始化。 ([7376ac0](https://github.com/Matkurban/flutter_cache_video_player/commit/7376ac046f0df1041c5cbe04463c8b392f29cdcd))
+
+
+### Bug Fixes
+
+* **linux:** prevent crash on uninitialized GL texture ([fe6a6d9](https://github.com/Matkurban/flutter_cache_video_player/commit/fe6a6d9d486b019d3f65d1cb87166ab40a91b70f))
+* **macos:** correct playback event reporting ([fe6a6d9](https://github.com/Matkurban/flutter_cache_video_player/commit/fe6a6d9d486b019d3f65d1cb87166ab40a91b70f))
+* **player_scrubber:** clarify cached progress terminology ([fe6a6d9](https://github.com/Matkurban/flutter_cache_video_player/commit/fe6a6d9d486b019d3f65d1cb87166ab40a91b70f))
+* 修复Linux中运行失败的错误 ([7376ac0](https://github.com/Matkurban/flutter_cache_video_player/commit/7376ac046f0df1041c5cbe04463c8b392f29cdcd))
+
 ## [1.6.1](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.6.0...v1.6.1) (2026-04-21)
 
 
