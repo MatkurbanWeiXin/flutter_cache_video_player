@@ -188,24 +188,6 @@ the frame fades the overlay in/out; it auto-hides during playback.
 Cached progress is supplied **by the plugin itself** (driven by the download
 bitmap in the cache repository) — you do not need to feed it manually.
 
-**Key parameters**
-
-| Parameter                                                           | Default                 | Description                                                                                                   |
-|---------------------------------------------------------------------|-------------------------|---------------------------------------------------------------------------------------------------------------|
-| `controller`                                                        | —                       | Required `VideoPlayerController`. Must be `initialize()`-d before playback starts.                            |
-| `aspectRatio`                                                       | `16 / 9`                | Used when `fill` is `false`.                                                                                  |
-| `fill`                                                              | `false`                 | When `true` the player fills the parent constraints instead of respecting `aspectRatio` (use for fullscreen). |
-| `skipDuration`                                                      | `Duration(seconds: 10)` | Controls the ±skip buttons. Matching SF Symbols are auto-picked for 10/15/30/45/60/75/90 s.                   |
-| `autoHideDelay`                                                     | `Duration(seconds: 3)`  | Time before the overlay fades while playing. `Duration.zero` disables auto-hide.                              |
-| `fadeDuration`                                                      | `240 ms`                | Overlay fade animation.                                                                                       |
-| `bufferedProgress`                                                  | `null`                  | Optional override; by default the plugin's `controller.bufferedProgress` drives the buffered segment.         |
-| `style`                                                             | `VideoPlayerTheme()`    | Colors, sizes, paddings, scrim, glass, scrubber colors/heights, time label text style.                        |
-| `onClose` / `onMore`                                                | `null` / `null`         | Top-bar callbacks. `onClose` falls back to `Navigator.maybePop`.                                              |
-| `topBarActions`                                                     | `[]`                    | Extra actions injected before the "more" button (PiP, cast, etc.).                                            |
-| `errorBuilder` / `loadingBuilder`                                   | `null`                  | Forwarded to the underlying `CorePlayer`.                                                                     |
-| `topBarBuilder` / `centerControlsBuilder` / `bottomScrubberBuilder` | `null`                  | Fully replace any slot with your own widget while still receiving a `VideoPlayerSlotContext`.                 |
-| `extraOverlayBuilder`                                               | `null`                  | Adds an extra layer above the controls (subtitles, danmu, watermark, …).                                      |
-
 **Notes**
 
 - Icons are Cupertino SF Symbols. `skipDuration` must be one of 10 / 15 / 30 /
@@ -327,8 +309,7 @@ opening it in a full player.
 ```dart
 
 final duration = await
-FlutterCacheVideoPlayer.instance.getDuration
-(
+FlutterCacheVideoPlayer.instance.getDuration(
 VideoSource.network('https://example.com/video.mp4'),
 timeout: const Duration(seconds: 10),
 );

@@ -21,14 +21,14 @@
 
 ## 平台引擎
 
-| 平台      | 原生引擎                                      |
-|---------|-------------------------------------------|
-| Android | ExoPlayer (Media3)                        |
-| iOS     | AVPlayer                                  |
-| macOS   | AVPlayer                                  |
-| Linux   | libmpv（软件渲染）                         |
-| Windows | libmpv（软件渲染）                         |
-| Web     | HTML5 `<video>`                           |
+| 平台      | 原生引擎               |
+|---------|--------------------|
+| Android | ExoPlayer (Media3) |
+| iOS     | AVPlayer           |
+| macOS   | AVPlayer           |
+| Linux   | libmpv（软件渲染）       |
+| Windows | libmpv（软件渲染）       |
+| Web     | HTML5 `<video>`    |
 
 ## 架构概览
 
@@ -230,7 +230,7 @@ void initState() {
 
 @override
 Widget build(BuildContext context) {
-  return FlutterCacheVideoPlayerView(
+  return CorePlayer(
     controller: controller,
     aspectRatio: 16 / 9,
     backgroundColor: Colors.black,
@@ -259,7 +259,7 @@ void dispose() {
 - 当 `playState == PlayState.error` 时视频帧会被隐藏，请在 `errorBuilder`
   里提供"重试"入口以便恢复播放。
 
-### `DefaultVideoPlayer` — 高性能默认播放器
+### `VideoPlayer` — 高性能默认播放器
 
 基于 `FlutterCacheVideoPlayerView` 之上构建的 iOS 风格开箱即用播放器。包含
 顶部栏（关闭 + 更多）、中央控制区（±快进/快退 + 播放/暂停）、底部进度条
@@ -283,7 +283,7 @@ void initState() {
 
 @override
 Widget build(BuildContext context) {
-  return DefaultVideoPlayer(
+  return VideoPlayer(
     controller: controller,
     aspectRatio: 16 / 9,
     skipDuration: const Duration(seconds: 10),
@@ -298,24 +298,6 @@ Widget build(BuildContext context) {
   );
 }
 ```
-
-**关键参数**
-
-| 参数                 | 默认值                     | 说明                                                                                            |
-|--------------------|-------------------------|-----------------------------------------------------------------------------------------------|
-| `controller`       | —                       | 必填 `FlutterCacheVideoPlayerController`，使用前需 `initialize()`。                                   |
-| `aspectRatio`      | `16 / 9`                | 当 `fill` 为 `false` 时生效。                                                                       |
-| `fill`             | `false`                 | 为 `true` 时铺满父约束，忽略 `aspectRatio`（常用于全屏）。                                                      |
-| `skipDuration`     | `Duration(seconds: 10)` | ±快进/快退时长，自动匹配 10/15/30/45/60/75/90 秒对应的 SF 图标。                                                |
-| `autoHideDelay`    | `Duration(seconds: 3)`  | 播放时隐藏控件的延迟。设为 `Duration.zero` 可关闭自动隐藏。                                                        |
-| `fadeDuration`     | `240 ms`                | 控件淡入/淡出时长。                                                                                    |
-| `bufferedProgress` | `null`                  | 可选覆盖；不传时进度条自动使用 `controller.bufferedProgress`。                                                 |
-| `style`            | `DefaultVideoPlayerTheme()` | 颜色、尺寸、内边距、遮罩强度、毛玻璃、进度条颜色/高度、时间文字样式。                                                          |
-| `onClose` / `onMore` | `null` / `null`       | 顶部栏回调。`onClose` 默认回退到 `Navigator.maybePop`。                                                    |
-| `topBarActions`    | `[]`                    | 在"更多"按钮之前插入的额外 action（画中画、投屏等）。                                                              |
-| `errorBuilder` / `loadingBuilder` | `null`   | 透传给底层 `FlutterCacheVideoPlayerView`。                                                           |
-| `topBarBuilder` / `centerControlsBuilder` / `bottomScrubberBuilder` | `null` | 用你自己的组件替换整个槽位，同时仍可拿到 `DefaultVideoPlayerSlotContext`。 |
-| `extraOverlayBuilder` | `null`               | 在控件之上再叠加的自定义图层（字幕、弹幕、水印等）。                                                                    |
 
 **注意事项**
 
@@ -401,14 +383,14 @@ for (final f in frames) {
 
 ### 平台实现情况
 
-| 平台 | `takeSnapshot` | `extractCoverCandidates` |
-|------|:--------------:|:------------------------:|
-| iOS      | ✅ AVPlayerItemVideoOutput + Core Image | ✅ AVAssetImageGenerator |
-| Android  | ✅ MediaMetadataRetriever | ✅ MediaMetadataRetriever |
-| macOS    | ✅ AVPlayerItemVideoOutput + Core Image | ✅ AVAssetImageGenerator |
-| Web      | ✅ `<canvas>.toDataURL` | ✅ 离屏 `<video>` + `<canvas>`（需 CORS） |
-| Windows  | ✅ libmpv `screenshot-to-file` 返回 PNG 字节 | ✅ 基于 libmpv 的封面提取 |
-| Linux    | ✅ libmpv `screenshot-to-file` 返回 PNG 字节 | ✅ 基于 libmpv 的封面提取 |
+| 平台      |             `takeSnapshot`              |      `extractCoverCandidates`       |
+|---------|:---------------------------------------:|:-----------------------------------:|
+| iOS     | ✅ AVPlayerItemVideoOutput + Core Image  |       ✅ AVAssetImageGenerator       |
+| Android |        ✅ MediaMetadataRetriever         |      ✅ MediaMetadataRetriever       |
+| macOS   | ✅ AVPlayerItemVideoOutput + Core Image  |       ✅ AVAssetImageGenerator       |
+| Web     |         ✅ `<canvas>.toDataURL`          | ✅ 离屏 `<video>` + `<canvas>`（需 CORS） |
+| Windows | ✅ libmpv `screenshot-to-file` 返回 PNG 字节 |          ✅ 基于 libmpv 的封面提取          |
+| Linux   | ✅ libmpv `screenshot-to-file` 返回 PNG 字节 |          ✅ 基于 libmpv 的封面提取          |
 
 Web 端做封面抽取时需要视频源返回允许 `crossOrigin="anonymous"` 的 CORS
 响应头，否则 canvas 会被标记为 tainted，方法会直接返回空列表。
@@ -453,14 +435,14 @@ await FlutterCacheVideoPlayer.instance.getDuration(
 
 ### 时长获取的平台实现
 
-| 平台 | 后端实现 |
-|------|----------|
-| iOS      | `AVURLAsset.loadValuesAsynchronously(forKeys:["duration"])` |
-| macOS    | `AVURLAsset.loadValuesAsynchronously(forKeys:["duration"])` |
-| Android  | `MediaMetadataRetriever`（`METADATA_KEY_DURATION`）         |
-| Linux    | libmpv 短命探测实例（与主播放器共用同一套 tail-moov 友好的 demuxer 参数） |
-| Windows  | libmpv 短命探测实例（与主播放器共用同一套 tail-moov 友好的 demuxer 参数） |
-| Web      | 离屏 `<video preload="metadata">` + `loadedmetadata` 事件 |
+| 平台      | 后端实现                                                        |
+|---------|-------------------------------------------------------------|
+| iOS     | `AVURLAsset.loadValuesAsynchronously(forKeys:["duration"])` |
+| macOS   | `AVURLAsset.loadValuesAsynchronously(forKeys:["duration"])` |
+| Android | `MediaMetadataRetriever`（`METADATA_KEY_DURATION`）           |
+| Linux   | libmpv 短命探测实例（与主播放器共用同一套 tail-moov 友好的 demuxer 参数）          |
+| Windows | libmpv 短命探测实例（与主播放器共用同一套 tail-moov 友好的 demuxer 参数）          |
+| Web     | 离屏 `<video preload="metadata">` + `loadedmetadata` 事件       |
 
 **注意事项**
 
