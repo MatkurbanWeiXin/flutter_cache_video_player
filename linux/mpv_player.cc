@@ -164,6 +164,30 @@ bool MpvPlayer::Initialize(std::string* error) {
   SetOptionString(mpv_, "hwdec", "no");
   SetOptionString(mpv_, "vo", "libmpv");
   SetOptionString(mpv_, "idle", "yes");
+  // ──── mp_image_crop assertion workaround ────────────────────────────
+  // libmpv's SW render backend (video/out/libmpv_sw.c) has a long-standing
+  // bug for videos that carry rotation metadata (rotate=90/270 — typical
+  // for phone-recorded vertical clips, or any file with a Display Matrix
+  // side-data such as the WeChat-style msg_video_*.mp4):
+  //
+  //   1. vo_libmpv reports VO_CAP_ROTATE90, so mpv expects the VO to
+  //      handle rotation itself and does NOT insert an auto-rotation vf.
+  //   2. video/out/aspect.c::mp_get_src_dst_rects swaps src_w/src_h and
+  //      rotates the source rect when video->rotate%180==90.
+  //   3. video/out/libmpv_sw.c then calls mp_image_crop_rc(&src, src_rc)
+  //      with rotated rect coordinates against the *unrotated* decoded
+  //      frame. For a 640x480 + rotate=90 frame this asks to crop with
+  //      y1=640 against img->h=480, hitting the assertion
+  //      "x1<=img->w && y1<=img->h" in mp_image.c:601.
+  //
+  // Workaround: tell mpv to ignore the file's rotation metadata
+  // (`video-rotate=no` makes the decoder wrapper force m.rotate=0; see
+  // filters/f_decoder_wrapper.c). We then read the original rotation
+  // from `current-tracks/video/demux-rotation` once the file is loaded
+  // and apply an actual pixel rotation via a `vf` transpose/flip
+  // filter. This both sidesteps the assertion and gets phone-vertical
+  // clips displayed in their intended orientation.
+  SetOptionString(mpv_, "video-rotate", "no");
   // Force libavformat to seek and probe aggressively so that MP4/MOV files
   // whose `moov` atom sits at the tail (i.e. not faststart-optimized) report
   // the correct duration instead of an early guess based on bitrate.
@@ -207,8 +231,12 @@ bool MpvPlayer::Initialize(std::string* error) {
   mpv_observe_property(mpv_, kPropEof, "eof-reached", MPV_FORMAT_FLAG);
   mpv_observe_property(mpv_, kPropVideoWidth, "dwidth", MPV_FORMAT_INT64);
   mpv_observe_property(mpv_, kPropVideoHeight, "dheight", MPV_FORMAT_INT64);
-  mpv_observe_property(mpv_, kPropSrcWidth, "width", MPV_FORMAT_INT64);
-  mpv_observe_property(mpv_, kPropSrcHeight, "height", MPV_FORMAT_INT64);
+  // Use video-params/dw|dh (display-corrected dimensions from the decoder)
+  // rather than raw coded width/height. This ensures the SW render target
+  // matches mpv's internal display geometry even for videos with non-square
+  // pixels (SAR ≠ 1), preventing the mp_image_crop assertion failure.
+  mpv_observe_property(mpv_, kPropSrcWidth, "video-params/dw", MPV_FORMAT_INT64);
+  mpv_observe_property(mpv_, kPropSrcHeight, "video-params/dh", MPV_FORMAT_INT64);
   return true;
 }
 
@@ -295,6 +323,28 @@ void MpvPlayer::HandleMpvEvent(mpv_event* ev) {
     case MPV_EVENT_FILE_LOADED:
     case MPV_EVENT_START_FILE:
     case MPV_EVENT_PLAYBACK_RESTART: {
+      // After the file is loaded, look up the source rotation that we
+      // asked mpv to *ignore* (via `video-rotate=no`) and apply it
+      // ourselves as a real pixel transformation through a vf filter.
+      // Without this, phone vertical clips (which carry rotate=90/270
+      // metadata) would display sideways. With this, we both work
+      // around the libmpv_sw.c crop bug and get correctly oriented
+      // frames.
+      if (ev->event_id == MPV_EVENT_FILE_LOADED && mpv_) {
+        int64_t rotation = 0;
+        mpv_get_property(mpv_, "current-tracks/video/demux-rotation",
+                         MPV_FORMAT_INT64, &rotation);
+        rotation = ((rotation % 360) + 360) % 360;
+        const char* vf_value = "";
+        switch (rotation) {
+          case 90:  vf_value = "lavfi=[transpose=clock]"; break;
+          case 180: vf_value = "lavfi=[hflip,vflip]"; break;
+          case 270: vf_value = "lavfi=[transpose=cclock]"; break;
+          default:  vf_value = ""; break;
+        }
+        const char* set_vf[] = {"set", "vf", vf_value, nullptr};
+        mpv_command_async(mpv_, 0, set_vf);
+      }
       // Property-change observation for `pause` only fires on *changes*.
       // When a new file starts and pause was already false (our default), no
       // event is delivered — the Dart side would be stuck in "loading"
@@ -455,6 +505,17 @@ bool MpvPlayer::Render() {
     if (w <= 0) w = 1;
     if (h <= 0) h = 1;
   }
+
+  // Align to a multiple of 4 on both axes. Many YUV pixel formats (yuv420p,
+  // nv12) have 2×2 chroma subsampling, and several mpv internal filters
+  // operate on 4-pixel SIMD blocks; libmpv's SW crop math can produce an
+  // off-by-one or off-by-two on dimensions that aren't a multiple of 4,
+  // triggering the "x1 <= img->w && y1 <= img->h" assertion in mp_image_crop.
+  w = (w / 4) * 4;
+  h = (h / 4) * 4;
+  if (w < 4) w = 4;
+  if (h < 4) h = 4;
+
   return PerformRender(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
 }
 

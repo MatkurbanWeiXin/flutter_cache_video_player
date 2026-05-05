@@ -1,19 +1,21 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:signals_flutter/signals_flutter.dart';
+
 import '../core/constants.dart';
-import '../data/models/media_index.dart';
 import '../data/models/chunk_bitmap.dart';
+import '../data/models/media_index.dart';
 import '../data/repositories/cache_repository.dart';
 import '../download/download_manager.dart';
 import '../download/download_task.dart';
 import '../utils/file_utils.dart';
 import '../utils/url_hasher.dart';
-import 'range_handler.dart';
 import 'mime_detector.dart';
+import 'range_handler.dart';
 
 /// 本地 HTTP 代理缓存服务器，基于 shelf 为播放器提供媒体流。
 /// Local HTTP proxy cache server based on shelf, serving media streams to the player.
@@ -251,28 +253,94 @@ class ProxyCacheServer {
     int readStart,
     int readEnd,
   ) async {
-    File file = File(chunkPath);
-    int offset = readStart;
+    final length = readEnd - readStart + 1;
+    final remaining = await _readExactRange(
+      controller: controller,
+      cancelToken: cancelToken,
+      chunkPath: chunkPath,
+      mergedPath: mergedPath,
+      chunkIndex: chunkIndex,
+      offsetWithinChunk: readStart,
+      length: length,
+    );
+    if (remaining > 0) {
+      throw StateError('Short read for chunk $chunkIndex: $remaining bytes missing of $length');
+    }
+  }
 
-    if (!await file.exists()) {
-      // Try merged file
-      file = File(mergedPath);
-      if (!await file.exists()) {
-        throw StateError('Neither chunk nor merged file exists for chunk $chunkIndex');
+  /// 优先尝试合并文件（避免与 ChunkMerger 删除 chunk 文件竞态），其次单分片
+  /// 文件，必要时短暂重试。读取时使用循环以避免 RandomAccessFile.read 在大请求
+  /// 下出现短读导致响应字节不足。返回剩余未读字节数（应为 0）。
+  ///
+  /// Reads `[offsetWithinChunk, offsetWithinChunk+length)` from disk into
+  /// `controller`, preferring the merged file (which never races with the
+  /// chunk merger) and falling back to the per-chunk file. Uses a read-loop
+  /// to handle short reads, with brief retries to bridge the merger's
+  /// rename-and-delete window. Returns the number of bytes still missing
+  /// (0 on success).
+  Future<int> _readExactRange({
+    required StreamController<List<int>> controller,
+    required _CancelToken cancelToken,
+    required String chunkPath,
+    required String mergedPath,
+    required int chunkIndex,
+    required int offsetWithinChunk,
+    required int length,
+  }) async {
+    int remaining = length;
+    int chunkOffset = offsetWithinChunk;
+
+    // Up to ~1s of retries (10×100ms) to bridge any merger window where
+    // neither file is momentarily resolvable.
+    for (int attempt = 0; attempt < 10 && remaining > 0; attempt++) {
+      if (cancelToken.isCancelled || controller.isClosed) return remaining;
+
+      // Prefer the merged file: once it exists, it is the canonical source
+      // and will not be deleted by the merger.
+      File? file;
+      int offset = 0;
+      if (await File(mergedPath).exists()) {
+        file = File(mergedPath);
+        offset = chunkIndex * config.chunkSize + chunkOffset;
+      } else if (await File(chunkPath).exists()) {
+        file = File(chunkPath);
+        offset = chunkOffset;
       }
-      offset = chunkIndex * config.chunkSize + readStart;
-    }
 
-    final raf = await file.open(mode: FileMode.read);
-    try {
-      await raf.setPosition(offset);
-      final length = readEnd - readStart + 1;
-      final data = await raf.read(length);
-      if (cancelToken.isCancelled || controller.isClosed) return;
-      controller.add(data);
-    } finally {
-      await raf.close();
+      if (file == null) {
+        // Both missing — likely merger's rename-then-delete gap. Wait briefly.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        continue;
+      }
+
+      try {
+        final raf = await file.open(mode: FileMode.read);
+        try {
+          await raf.setPosition(offset);
+          // Read in chunks; RandomAccessFile.read may return less than asked
+          // for large reads, especially right after a write/rename.
+          while (remaining > 0) {
+            if (cancelToken.isCancelled || controller.isClosed) {
+              return remaining;
+            }
+            const int kReadStep = 256 * 1024;
+            final want = remaining < kReadStep ? remaining : kReadStep;
+            final data = await raf.read(want);
+            if (data.isEmpty) break; // EOF
+            controller.add(data);
+            remaining -= data.length;
+            chunkOffset += data.length;
+          }
+        } finally {
+          await raf.close();
+        }
+      } catch (_) {
+        // File vanished mid-read (merger deleted it on Windows-style FS,
+        // or some other transient FS error). Retry from the same offset.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
     }
+    return remaining;
   }
 
   Future<void> _downloadAndStream(
@@ -364,7 +432,32 @@ class ProxyCacheServer {
 
       final eventStart = event.downloadedBytes - data.length;
       final eventEnd = event.downloadedBytes;
-      final overlapStart = math.max(streamedUntil, math.max(readStart, eventStart));
+
+      // 关键不变量：写入 controller 的字节必须严格连续 [readStart..targetEnd)，
+      // 不允许出现空洞。progressStream 是非回放型 broadcast 流：当订阅是在
+      // worker 已发出若干 progress 事件之后建立时，早期字节无法补回。如果
+      // 此时直接接受 eventStart > streamedUntil 的事件并把 streamedUntil 推
+      // 进到 eventEnd，[streamedUntil..eventStart) 这段空洞将永远丢失，
+      // 后续 _readExactRange 也只补 [streamedUntil..end)。结果是响应总
+      // 字节数小于 content-length，触发 dart:io 的 HttpException。
+      // 因此对 "前向跳跃" 的事件直接丢弃——下载完成后由 _readExactRange
+      // 从落盘文件统一回填整段空洞，保证字节连续。
+      //
+      // Critical invariant: bytes appended to `controller` must form the
+      // contiguous range [readStart..targetEnd) with no gaps. progressStream
+      // is a non-replay broadcast stream — if our subscription attaches after
+      // the worker has already emitted progress events, the earlier bytes
+      // are gone. Naively accepting an event whose `eventStart > streamedUntil`
+      // and bumping `streamedUntil` to `eventEnd` creates a permanent hole at
+      // [streamedUntil..eventStart); the post-completion _readExactRange only
+      // fills [streamedUntil..end), so the response ends short and dart:io
+      // throws "Content size below specified contentLength". We therefore
+      // drop forward-jumping events here and rely on the post-completion
+      // disk read to backfill the entire missing range from the on-disk
+      // chunk / merged file.
+      if (eventStart > streamedUntil) return;
+
+      final overlapStart = math.max(streamedUntil, readStart);
       final overlapEnd = math.min(targetEndExclusive, eventEnd);
 
       if (overlapStart >= overlapEnd) return;
@@ -380,11 +473,16 @@ class ProxyCacheServer {
     // 在订阅就位后回填 .tmp 已落盘字节：调用方（如 ensureChunkPrefix）可能
     // 先一步消费了早期进度事件，导致此处订阅会错过这些字节。worker 在
     // 发出 progress 事件前已写入 .tmp，故文件长度即可信回填来源。
+    // 注意循环读取并按实际读到的字节数推进 streamedUntil，避免
+    // RandomAccessFile.read 短读引入空洞；同时尊重 listener 在 await 期间
+    // 已经推进过的 streamedUntil（每次循环重新评估），避免覆盖已写字节。
     // After the subscription attaches, backfill from the worker's `.tmp`
     // file. Earlier callers (e.g. ensureChunkPrefix) may have consumed
     // progress events before this listener was wired up; the worker writes
     // bytes to `.tmp` before emitting each progress event, so its length is
-    // a safe catch-up source.
+    // a safe catch-up source. Loop on the actual read length to dodge
+    // short-reads, and re-evaluate streamedUntil each iteration so we never
+    // overwrite bytes that the listener wrote during an awaiting gap.
     final chunkPath = '${media.localDir}/${FileUtils.chunkFileName(chunkIndex)}';
     final tmpPath = '$chunkPath.tmp';
     try {
@@ -395,11 +493,15 @@ class ProxyCacheServer {
         if (wantEnd > streamedUntil && !cancelToken.isCancelled && !controller.isClosed) {
           final raf = await tmpFile.open(mode: FileMode.read);
           try {
-            await raf.setPosition(streamedUntil);
-            final data = await raf.read(wantEnd - streamedUntil);
-            if (!cancelToken.isCancelled && !controller.isClosed) {
+            while (streamedUntil < wantEnd && !cancelToken.isCancelled && !controller.isClosed) {
+              await raf.setPosition(streamedUntil);
+              const int kReadStep = 256 * 1024;
+              final remaining = wantEnd - streamedUntil;
+              final want = remaining < kReadStep ? remaining : kReadStep;
+              final data = await raf.read(want);
+              if (data.isEmpty) break;
               controller.add(data);
-              streamedUntil = wantEnd;
+              streamedUntil += data.length;
             }
           } finally {
             await raf.close();
@@ -432,32 +534,27 @@ class ProxyCacheServer {
         return;
       }
 
-      // 下载完成后，直接从磁盘读取精确字节范围（支持合并文件回退）。
-      // After download completes, read the exact byte range from disk (with merged file fallback).
-      File file = File(chunkPath);
-      int offset = streamedUntil;
-
-      if (!await file.exists()) {
-        // 分片文件已被合并，改从合并文件读取。
-        // Chunk file has been merged; read from the merged file instead.
-        file = File(mergedPath);
-        offset = chunkIndex * config.chunkSize + streamedUntil;
-      }
-
-      if (await file.exists()) {
-        final raf = await file.open(mode: FileMode.read);
-        try {
-          await raf.setPosition(offset);
-          final length = targetEndExclusive - streamedUntil;
-          final data = await raf.read(length);
-          if (!cancelToken.isCancelled && !controller.isClosed) {
-            controller.add(data);
-          }
-        } finally {
-          await raf.close();
-        }
-      } else {
-        throw StateError('Chunk file not found after download: $chunkPath');
+      // 下载完成后，从磁盘读取剩余字节。优先使用 mergedPath（merger 一旦
+      // 生成就不会再被删除），并在读取时循环填满，避免 RandomAccessFile.read
+      // 出现短读或与 ChunkMerger 的 rename-then-delete 竞态导致响应字节不足。
+      // After the download is done, fill the remaining range from disk using
+      // a robust loop that prefers the merged file and tolerates the merger's
+      // rename/delete window. This addresses the
+      // "Content size below specified contentLength" HttpException seen for
+      // small files where the entire payload arrives via the post-completion
+      // disk read instead of the progress stream.
+      final length = targetEndExclusive - streamedUntil;
+      final missing = await _readExactRange(
+        controller: controller,
+        cancelToken: cancelToken,
+        chunkPath: chunkPath,
+        mergedPath: mergedPath,
+        chunkIndex: chunkIndex,
+        offsetWithinChunk: streamedUntil,
+        length: length,
+      );
+      if (missing > 0 && !cancelToken.isCancelled && !controller.isClosed) {
+        throw StateError('Chunk $chunkIndex: $missing bytes missing after download');
       }
     } finally {
       await progressSubscription.cancel();

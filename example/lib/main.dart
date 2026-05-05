@@ -56,13 +56,14 @@ class _ExampleAppState extends State<ExampleApp> {
 class _DemoItem {
   final String title;
   final String url;
+
   const _DemoItem(this.title, this.url);
 }
 
 const List<_DemoItem> _demoPlaylist = <_DemoItem>[
   _DemoItem(
-    'Pexels · Portrait 1080p',
-    'https://videos.pexels.com/video-files/33538187/14261042_1080_1920_60fps.mp4',
+    'ce shi',
+    'https://jsontodart.cn/api/object/7976982000/msg_video_dd802bb84715adfbbf71fa7413eb1d29.mp4',
   ),
   _DemoItem(
     'Pexels · 4K Landscape',
@@ -112,6 +113,7 @@ class HomePage extends StatelessWidget {
 
 class PlayerPage extends StatefulWidget {
   final int initialIndex;
+
   const PlayerPage({super.key, required this.initialIndex});
 
   @override
@@ -358,6 +360,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
 class _PlayerStateBar extends StatelessWidget {
   final VideoPlayerController controller;
+
   const _PlayerStateBar({required this.controller});
 
   @override
@@ -389,6 +392,7 @@ class _PlayerStateBar extends StatelessWidget {
 
 class _Chip extends StatelessWidget {
   final String label;
+
   const _Chip({required this.label});
 
   @override
@@ -410,6 +414,7 @@ class _Chip extends StatelessWidget {
 
 class _SpeedRow extends StatelessWidget {
   final VideoPlayerController controller;
+
   const _SpeedRow({required this.controller});
 
   static const List<double> _speeds = <double>[0.5, 1.0, 1.25, 1.5, 2.0];
@@ -448,6 +453,7 @@ class _SpeedRow extends StatelessWidget {
 
 class _SnapshotDialog extends StatelessWidget {
   final XFile file;
+
   const _SnapshotDialog({required this.file});
 
   @override
@@ -487,6 +493,7 @@ class _SnapshotDialog extends StatelessWidget {
 
 class _CoversDialog extends StatelessWidget {
   final List<VideoCoverFrame> frames;
+
   const _CoversDialog({required this.frames});
 
   @override
