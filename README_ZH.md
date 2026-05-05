@@ -289,7 +289,7 @@ Widget build(BuildContext context) {
     skipDuration: const Duration(seconds: 10),
     autoHideDelay: const Duration(seconds: 3),
     // 可选：自定义外观
-    style: const DefaultVideoPlayerStyle(
+    Theme(
       scrimIntensity: 0.55,
       enableGlassmorphism: false,
     ),
@@ -310,7 +310,7 @@ Widget build(BuildContext context) {
 | `autoHideDelay`    | `Duration(seconds: 3)`  | 播放时隐藏控件的延迟。设为 `Duration.zero` 可关闭自动隐藏。                                                        |
 | `fadeDuration`     | `240 ms`                | 控件淡入/淡出时长。                                                                                    |
 | `bufferedProgress` | `null`                  | 可选覆盖；不传时进度条自动使用 `controller.bufferedProgress`。                                                 |
-| `style`            | `DefaultVideoPlayerStyle()` | 颜色、尺寸、内边距、遮罩强度、毛玻璃、进度条颜色/高度、时间文字样式。                                                          |
+| `style`            | `DefaultVideoPlayerTheme()` | 颜色、尺寸、内边距、遮罩强度、毛玻璃、进度条颜色/高度、时间文字样式。                                                          |
 | `onClose` / `onMore` | `null` / `null`       | 顶部栏回调。`onClose` 默认回退到 `Navigator.maybePop`。                                                    |
 | `topBarActions`    | `[]`                    | 在"更多"按钮之前插入的额外 action（画中画、投屏等）。                                                              |
 | `errorBuilder` / `loadingBuilder` | `null`   | 透传给底层 `FlutterCacheVideoPlayerView`。                                                           |

@@ -26,8 +26,22 @@ class _ExampleAppState extends State<ExampleApp> {
       title: 'Cache Video Player',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.system,
-      theme: ThemeData.light(useMaterial3: true),
-      darkTheme: ThemeData.dark(useMaterial3: true),
+      theme: ThemeData.light(useMaterial3: true).copyWith(
+        extensions: const <ThemeExtension<dynamic>>[
+          VideoPlayerTheme(
+            foregroundColor: Colors.white,
+            backgroundColor: Colors.black,
+          ),
+        ],
+      ),
+      darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
+        extensions: const <ThemeExtension<dynamic>>[
+          VideoPlayerTheme(
+            foregroundColor: Colors.white,
+            backgroundColor: Colors.black,
+          ),
+        ],
+      ),
       home: const HomePage(),
     );
   }
@@ -107,7 +121,6 @@ class PlayerPage extends StatefulWidget {
 class _PlayerPageState extends State<PlayerPage> {
   final VideoPlayerController _controller = VideoPlayerController();
   late int _index = widget.initialIndex;
-  bool _ready = false;
   bool _fullscreen = false;
 
   @override
@@ -119,7 +132,6 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _boot() async {
     await _controller.initialize();
     if (!mounted) return;
-    setState(() => _ready = true);
     // Always start from the beginning when opening the demo.
     await _openCurrent();
   }
@@ -272,41 +284,36 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final player = !_ready
-        ? const ColoredBox(
-            color: Colors.black,
-            child: AspectRatio(
-              aspectRatio: 16 / 9,
-              child: Center(
-                child: CircularProgressIndicator(color: Colors.white),
-              ),
-            ),
-          )
-        : VideoPlayer(
-            controller: _controller,
-            fill: _fullscreen,
-            onClose: () {
-              if (_fullscreen) {
-                _toggleFullscreen();
-              } else {
-                Navigator.of(context).maybePop();
-              }
-            },
-            onMore: _showMoreSheet,
-            topBarActions: <Widget>[
-              PlayerIconButton(
-                icon: _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                size: 22,
-                onPressed: _toggleFullscreen,
-                semanticsLabel: 'Toggle fullscreen',
-              ),
-            ],
-          );
-
+    if (!mounted) return const SizedBox.shrink();
+    Widget player;
     if (_fullscreen) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: SafeArea(child: player),
+      player = VideoPlayer(
+        controller: _controller,
+        fill: true,
+        onClose: _toggleFullscreen,
+        topBarActions: [
+          IconButton(
+            icon: const Icon(Icons.more_horiz),
+            color: Colors.white,
+            onPressed: _showMoreSheet,
+          ),
+        ],
+      );
+    } else {
+      player = AspectRatio(
+        aspectRatio: 16 / 9,
+        child: VideoPlayer(
+          controller: _controller,
+          fill: true,
+          topBarActions: [
+            IconButton(
+              icon: const Icon(Icons.more_horiz),
+              color: Colors.white,
+              onPressed: _showMoreSheet,
+            ),
+          ],
+          // no close button in inline mode for example
+        ),
       );
     }
 

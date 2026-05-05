@@ -667,4 +667,3 @@ class _CancelToken {
     return () => _listeners.remove(callback);
   }
 }
-

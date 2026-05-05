@@ -117,8 +117,7 @@ void main() {
       final media = await harness.seedMedia(freshUrl, totalBytes: slowPayload.length);
       await harness.manager.startDownload(freshUrl, media);
 
-      final result =
-          await harness.fetchProxy(freshUrl, range: 'bytes=0-${slowPayload.length - 1}');
+      final result = await harness.fetchProxy(freshUrl, range: 'bytes=0-${slowPayload.length - 1}');
 
       expect(result.statusCode, HttpStatus.partialContent);
       expect(result.bytes, slowPayload);
@@ -140,8 +139,7 @@ void main() {
 
       final client = HttpClient();
       try {
-        final request =
-            await client.getUrl(Uri.parse(harness.proxy.proxyUrl(freshUrl)));
+        final request = await client.getUrl(Uri.parse(harness.proxy.proxyUrl(freshUrl)));
         request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-${slowPayload.length - 1}');
         final response = await request.close();
 
@@ -377,9 +375,7 @@ class _OriginFixture {
     }
 
     request.response.bufferOutput = false;
-    final splitAfter = asset.splitAfter == null
-        ? null
-        : asset.splitAfter!.clamp(0, slice.bytes.length);
+    final splitAfter = asset.splitAfter?.clamp(0, slice.bytes.length);
     if (splitAfter != null && splitAfter > 0 && splitAfter < slice.bytes.length) {
       if (asset.firstDelay > Duration.zero) {
         await Future<void>.delayed(asset.firstDelay);

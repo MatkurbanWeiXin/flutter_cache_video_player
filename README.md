@@ -199,7 +199,7 @@ bitmap in the cache repository) — you do not need to feed it manually.
 | `autoHideDelay`                                                     | `Duration(seconds: 3)`  | Time before the overlay fades while playing. `Duration.zero` disables auto-hide.                              |
 | `fadeDuration`                                                      | `240 ms`                | Overlay fade animation.                                                                                       |
 | `bufferedProgress`                                                  | `null`                  | Optional override; by default the plugin's `controller.bufferedProgress` drives the buffered segment.         |
-| `style`                                                             | `VideoPlayerStyle()`    | Colors, sizes, paddings, scrim, glass, scrubber colors/heights, time label text style.                        |
+| `style`                                                             | `VideoPlayerTheme()`    | Colors, sizes, paddings, scrim, glass, scrubber colors/heights, time label text style.                        |
 | `onClose` / `onMore`                                                | `null` / `null`         | Top-bar callbacks. `onClose` falls back to `Navigator.maybePop`.                                              |
 | `topBarActions`                                                     | `[]`                    | Extra actions injected before the "more" button (PiP, cast, etc.).                                            |
 | `errorBuilder` / `loadingBuilder`                                   | `null`                  | Forwarded to the underlying `CorePlayer`.                                                                     |

@@ -33,8 +33,7 @@ export 'src/player/platform_player_factory.dart';
 // UI
 export 'src/ui/core_player.dart';
 export 'src/ui/video_player.dart';
-export 'src/ui/widgets/player_icon_button.dart';
-export 'src/ui/widgets/player_gradient_mask.dart';
+export 'src/ui/style/video_player_theme.dart';
 export 'src/ui/widgets/player_scrubber_slider.dart';
 
 // Utils
