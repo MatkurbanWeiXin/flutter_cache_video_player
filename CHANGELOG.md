@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.8.0...v1.9.0) (2026-05-05)
+
+
+### Features
+
+* **proxy:** enhance file reading logic to handle short reads and improve robustness ([9624ceb](https://github.com/Matkurban/flutter_cache_video_player/commit/9624ceb21c123ed19d38affe4a032cb81e6aca37))
+
 ## [1.8.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.7.0...v1.8.0) (2026-05-05)
 
 
