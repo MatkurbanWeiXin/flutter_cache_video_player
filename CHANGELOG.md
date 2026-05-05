@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.7.0...v1.8.0) (2026-05-05)
+
+
+### Features
+
+* **proxy:** implement chunk prefetching to mitigate AVPlayer first-byte timeouts ([d5a67dc](https://github.com/Matkurban/flutter_cache_video_player/commit/d5a67dc1fedeccb60b188fbf2bdb48a1c2deaa3e))
+* **video_player:** implement theme extension for customizable video player styles ([f1397a3](https://github.com/Matkurban/flutter_cache_video_player/commit/f1397a302573c33d040929ec37f4cb964576914f))
+
 ## [1.7.0](https://github.com/Matkurban/flutter_cache_video_player/compare/v1.6.1...v1.7.0) (2026-05-04)
 
 
